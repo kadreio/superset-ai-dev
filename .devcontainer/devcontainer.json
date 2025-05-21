@@ -1,0 +1,86 @@
+{
+  "name": "Apache Superset Development",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "superset-dev",
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+  
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0.5": {}
+  },
+  
+  "mounts": [
+    // Use named volume for node_modules to improve performance and avoid permission issues
+    "source=superset-node-modules,target=/app/superset-frontend/node_modules,type=volume"
+  ],
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/app/.venv/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "typescript.preferences.includePackageJsonAutoImports": "auto",
+        "eslint.workingDirectories": ["superset-frontend"],
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": true
+        },
+        "files.associations": {
+          "*.tsx": "typescriptreact",
+          "*.ts": "typescript"
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.flake8",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "ms-vscode.vscode-typescript-next",
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml"
+      ]
+    }
+  },
+
+  "forwardPorts": [
+    8088,
+    9000,
+    8080,
+    5432,
+    6379
+  ],
+
+  "portsAttributes": {
+    "8088": {
+      "label": "Superset Backend",
+      "onAutoForward": "notify"
+    },
+    "9000": {
+      "label": "Superset Frontend (Dev Server)",
+      "onAutoForward": "openPreview"
+    },
+    "8080": {
+      "label": "WebSocket Server",
+      "onAutoForward": "silent"
+    },
+    "5432": {
+      "label": "PostgreSQL",
+      "onAutoForward": "silent"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "silent"
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start-services.sh",
+
+  "remoteUser": "superset",
+  "containerEnv": {
+    "DEV_MODE": "true",
+    "BUILD_SUPERSET_FRONTEND_IN_DOCKER": "false",
+    "SUPERSET_LOAD_EXAMPLES": "yes",
+    "SUPERSET_LOG_LEVEL": "info"
+  }
+}

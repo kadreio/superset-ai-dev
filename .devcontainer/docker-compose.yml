@@ -1,0 +1,88 @@
+version: '3.8'
+
+x-superset-volumes: &superset-volumes
+  - ..:/app:cached
+  - superset_home:/app/superset_home
+  - node_modules:/app/superset-frontend/node_modules
+
+services:
+  redis:
+    image: redis:7
+    container_name: superset_devcontainer_cache
+    restart: unless-stopped
+    volumes:
+      - redis:/data
+    ports:
+      - "6379:6379"
+
+  db:
+    image: postgres:16
+    container_name: superset_devcontainer_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_home:/var/lib/postgresql/data
+      - ../docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+
+  superset-dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        DEV_MODE: "true"
+        INCLUDE_CHROMIUM: "false"
+        INCLUDE_FIREFOX: "false"
+        BUILD_TRANSLATIONS: "false"
+    container_name: superset_devcontainer_main
+    command: ["sleep", "infinity"]
+    environment:
+      - DATABASE_DIALECT=postgresql
+      - DATABASE_USER=superset
+      - DATABASE_PASSWORD=superset
+      - DATABASE_HOST=db
+      - DATABASE_PORT=5432
+      - DATABASE_DB=superset
+      - EXAMPLES_USER=superset
+      - EXAMPLES_PASSWORD=superset
+      - EXAMPLES_HOST=db
+      - EXAMPLES_PORT=5432
+      - EXAMPLES_DB=superset
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_CELERY_DB=0
+      - REDIS_RESULTS_DB=1
+      - SUPERSET_ENV=development
+      - FLASK_APP=superset.app:create_app()
+      - FLASK_DEBUG=1
+      - PYTHONPATH=/app:/app/docker/pythonpath_dev
+      - SUPERSET_PORT=8088
+      - SUPERSET_HOME=/app/superset_home
+      - DEV_MODE=true
+      - BUILD_SUPERSET_FRONTEND_IN_DOCKER=false
+      - SUPERSET_LOAD_EXAMPLES=yes
+      - SUPERSET_LOG_LEVEL=info
+    ports:
+      - "8088:8088"
+      - "9000:9000"  
+      - "8080:8080"
+    depends_on:
+      - db
+      - redis
+    volumes: *superset-volumes
+    user: "1000:1000"  # Run as superset user (UID/GID 1000)
+    working_dir: /app
+
+volumes:
+  superset_home:
+    external: false
+  db_home:
+    external: false
+  redis:
+    external: false
+  node_modules:
+    external: false
