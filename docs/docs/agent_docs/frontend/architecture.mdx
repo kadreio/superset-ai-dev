@@ -1,0 +1,179 @@
+# Frontend Architecture
+
+Apache Superset's frontend is a modern, enterprise-ready React application with a plugin-driven architecture that provides extensive data visualization capabilities.
+
+## Overview
+
+The frontend follows a **layered, plugin-driven architecture** with clear separation of concerns:
+
+- **Application Layer**: React SPA with Redux state management
+- **Plugin System**: Extensible visualization framework
+- **Component Library**: Design system with reusable components
+- **Build System**: Modern toolchain with TypeScript, Webpack, and comprehensive testing
+
+## Core Architecture
+
+### Application Structure
+
+```
+superset-frontend/
+├── src/                    # Main application source
+│   ├── components/         # Reusable UI components
+│   ├── features/          # Feature-specific modules
+│   ├── pages/             # Top-level page components
+│   ├── views/             # App shell and providers
+│   ├── hooks/             # Custom React hooks
+│   ├── utils/             # Utility functions
+│   └── types/             # TypeScript definitions
+├── packages/              # Core framework packages
+│   ├── superset-ui-core/          # Plugin framework
+│   ├── superset-ui-chart-controls/ # Control panel framework
+│   └── superset-ui-switchboard/   # Communication framework
+├── plugins/               # Chart plugins
+│   ├── legacy-plugin-chart-*     # Legacy D3/jQuery charts
+│   ├── plugin-chart-*           # Modern React charts
+│   └── legacy-preset-chart-*    # Chart collections
+├── spec/                  # Test fixtures and helpers
+└── cypress-base/          # End-to-end tests
+```
+
+### State Management
+
+**Redux Store Structure:**
+```typescript
+{
+  sqlLab: SqlLab state and queries
+  charts: Chart data and rendering state
+  dashboards: Dashboard layout and filters
+  dataMask: Cross-filter state management
+  nativeFilters: Filter component state
+  explore: Chart exploration interface
+  messageToasts: Global notifications
+  user: Authentication and permissions
+}
+```
+
+**Key Patterns:**
+- **Domain Slices**: Feature-specific reducers with actions
+- **Shared State**: Cross-cutting concerns like filters and user data
+- **Persistence**: SqlLab state persisted to localStorage
+- **Middleware**: Logging, API interactions, and state persistence
+
+### Plugin System
+
+The frontend uses a **registry-based plugin architecture** that allows:
+
+- **Chart Registration**: Plugins register chart types and metadata
+- **Control Panels**: Shared configuration interface framework
+- **Lazy Loading**: Charts loaded on demand with React.Suspense
+- **Metadata System**: Declarative chart capabilities and requirements
+
+**Plugin Structure:**
+```typescript
+export default class ChartPlugin extends ChartPlugin<Config, Data> {
+  constructor() {
+    super({
+      metadata: /* chart metadata */,
+      Chart: /* chart component */,
+      buildQuery: /* query builder */,
+      controlPanel: /* configuration controls */,
+    });
+  }
+}
+```
+
+## Component Organization
+
+### Design System Approach
+
+Based on **Atomic Design** principles:
+
+- **Atoms**: Basic UI elements (Button, Input, Select)
+- **Molecules**: Composite components (SearchInput, FormField)
+- **Organisms**: Complex components (DataTable, ChartContainer)
+- **Templates**: Page layouts and structure
+
+### Component Structure
+
+Standard component organization:
+```
+ComponentName/
+├── index.tsx                    # Main component implementation
+├── ComponentName.stories.tsx    # Storybook documentation
+├── ComponentName.test.tsx       # Jest unit tests
+├── types.ts                     # TypeScript interfaces
+└── styles.tsx                   # Emotion styled components
+```
+
+### Styling System
+
+- **Ant Design Foundation**: Base component library
+- **Emotion Styling**: CSS-in-JS with theme support
+- **Theme Provider**: Centralized design tokens
+- **Responsive Design**: Built-in breakpoint support
+
+## Development Patterns
+
+### TypeScript Integration
+
+- **Strict Mode**: Comprehensive type checking enabled
+- **Path Mapping**: Simplified imports for packages and plugins
+- **Interface Definitions**: Strong typing for props and state
+- **Generic Components**: Type-safe reusable components
+
+### Testing Strategy
+
+**Multi-layer Testing:**
+- **Unit Tests**: React Testing Library for component logic
+- **Integration Tests**: Feature workflows and API interactions
+- **E2E Tests**: Cypress for complete user journeys
+- **Visual Tests**: Storybook integration for UI consistency
+
+### Build Optimization
+
+- **Code Splitting**: Route-based and component-based chunks
+- **Tree Shaking**: Unused code elimination
+- **Bundle Analysis**: Size monitoring and optimization
+- **Hot Reload**: Fast development feedback
+
+## Key Features
+
+### Internationalization (i18n)
+
+- **String Extraction**: Babel plugin for automatic extraction
+- **Translation Workflow**: PO file management
+- **Runtime Switching**: Dynamic language changes
+- **Pluralization**: Context-aware translations
+
+### Performance Optimization
+
+- **Lazy Loading**: On-demand loading of pages and charts
+- **Memoization**: Component and calculation optimization
+- **Virtualization**: Efficient rendering of large datasets
+- **Caching**: Query result and metadata caching
+
+### Developer Experience
+
+- **Hot Reload**: Instant development feedback
+- **Storybook**: Isolated component development
+- **TypeScript**: Strong typing and intellisense
+- **ESLint Rules**: Custom rules for code quality
+- **Prettier**: Consistent code formatting
+
+## Integration Points
+
+### Backend Communication
+
+- **SupersetClient**: Centralized API client
+- **Query Management**: Async query handling
+- **Error Handling**: Consistent error states
+- **Authentication**: Token-based auth flow
+
+### Embedded Context
+
+- **Guest Token**: Secure embedding support
+- **Communication**: PostMessage-based bridge
+- **Configuration**: Runtime feature toggles
+- **Theming**: Embedded-specific styling
+
+This architecture provides a robust foundation for building scalable data visualization applications with extensive customization capabilities.

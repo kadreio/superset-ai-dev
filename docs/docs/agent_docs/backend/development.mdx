@@ -1,0 +1,389 @@
+# Development Workflow
+
+Guide for developing Superset backend features, including setup, coding patterns, testing, and deployment practices.
+
+## Development Environment
+
+### Dev Container Setup
+Superset is designed to run in VS Code Dev Container for consistent development experience:
+
+```bash
+# Automatic setup - services start automatically
+1. Open project in VS Code
+2. VS Code detects devcontainer and prompts to reopen
+3. All services start automatically via postStartCommand
+4. Access application at http://localhost:9000
+```
+
+### Manual Service Management
+```bash
+# Restart all services if needed
+bash .devcontainer/restart-services.sh
+
+# Check service logs
+tail -f /app/superset_home/logs/backend.log      # Backend logs
+tail -f /app/superset_home/logs/celery.log       # Celery logs
+
+# Manual service control (rarely needed)
+make flask-app                                    # Backend only
+make celery                                       # Celery worker only
+```
+
+### Environment Configuration
+```bash
+# Python environment (automatically activated in devcontainer)
+source /app/.venv/bin/activate
+
+# Database operations
+superset db upgrade              # Apply new migrations
+superset init                    # Initialize roles/permissions
+superset load-examples           # Load sample data
+superset fab create-admin        # Create admin user
+```
+
+## Development Commands
+
+### Primary Commands
+```bash
+# Start development server
+make flask-app                   # Backend on http://localhost:8088
+
+# Code quality
+make format                      # Format Python and JS code
+ruff check .                     # Python linting
+ruff format .                    # Python formatting
+mypy superset/                   # Type checking
+
+# Testing
+pytest tests/unit_tests/         # Unit tests
+scripts/tests/run.sh             # Full integration tests
+scripts/python_tests.sh          # Integration with coverage
+
+# Database management
+superset db migrate              # Create new migration
+superset db upgrade              # Apply migrations
+superset db downgrade            # Rollback migrations
+```
+
+### Development Makefile Targets
+```bash
+make install                     # Complete setup with examples
+make update                      # Update dependencies
+make clean                       # Clean build artifacts
+make build                       # Build frontend and backend
+make test                        # Run all tests
+```
+
+## Code Development Patterns
+
+### Feature Development Flow
+1. **Create branch** from master
+2. **Write tests** first (TDD approach)
+3. **Implement feature** following architecture patterns
+4. **Run quality checks** (linting, type checking, tests)
+5. **Create migrations** if database changes
+6. **Update documentation** if needed
+
+### New Feature Template
+```python
+# 1. Create model (if needed)
+# /superset/models/my_feature.py
+class MyFeature(Model, AuditMixinNullable):
+    __tablename__ = 'my_features'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+
+# 2. Create DAO
+# /superset/daos/my_feature.py
+class MyFeatureDAO(BaseDAO[MyFeature]):
+    model_cls = MyFeature
+
+    @classmethod
+    def find_by_name(cls, name: str) -> MyFeature | None:
+        return db.session.query(MyFeature).filter_by(name=name).first()
+
+# 3. Create commands
+# /superset/commands/my_feature/create.py
+class CreateMyFeatureCommand(BaseCommand):
+    def __init__(self, data: dict[str, Any]):
+        self._properties = data
+
+    def run(self) -> MyFeature:
+        self.validate()
+        return MyFeatureDAO.create(self._properties)
+
+    def validate(self) -> None:
+        if not self._properties.get('name'):
+            raise ValidationError("Name is required")
+
+# 4. Create API
+# /superset/my_features/api.py
+class MyFeatureRestApi(BaseSupersetModelRestApi):
+    datamodel = SQLAInterface(MyFeature)
+
+    @expose('/', methods=['POST'])
+    @protect()
+    def post(self) -> Response:
+        command = CreateMyFeatureCommand(request.json)
+        result = command.run()
+        return self.response(201, id=result.id)
+
+# 5. Register API
+# /superset/views/__init__.py
+appbuilder.add_api(MyFeatureRestApi)
+```
+
+### Database Migrations
+```bash
+# Create migration for model changes
+superset db migrate -m "Add my_feature table"
+
+# Migration file automatically generated in /superset/migrations/versions/
+# Review and edit migration before applying
+
+# Apply migration
+superset db upgrade
+
+# Rollback if needed
+superset db downgrade
+```
+
+### Testing New Features
+```python
+# Unit test
+# tests/unit_tests/my_features/test_commands.py
+class TestCreateMyFeatureCommand:
+    def test_create_valid_feature(self):
+        command = CreateMyFeatureCommand({'name': 'Test Feature'})
+        result = command.run()
+        assert result.name == 'Test Feature'
+
+    def test_create_invalid_feature(self):
+        command = CreateMyFeatureCommand({})
+        with pytest.raises(ValidationError):
+            command.run()
+
+# Integration test
+# tests/integration_tests/my_features/api_tests.py
+class TestMyFeatureApi(SupersetTestCase):
+    def test_create_feature_via_api(self):
+        self.login('admin')
+        response = self.client.post('/api/v1/my_feature/', json={
+            'name': 'Test Feature'
+        })
+        self.assertEqual(response.status_code, 201)
+```
+
+## Code Quality
+
+### Pre-commit Hooks
+```bash
+# Install hooks (run once)
+pre-commit install
+
+# Manual run (hooks run automatically on commit)
+pre-commit run --all-files
+
+# Hooks include:
+# - ruff (linting and formatting)
+# - mypy (type checking)
+# - prettier (JS/CSS formatting)
+# - eslint (JS linting)
+```
+
+### Linting & Formatting
+```bash
+# Ruff replaces flake8, isort, black
+ruff check .                     # Linting
+ruff check --fix .               # Auto-fix issues
+ruff format .                    # Formatting
+
+# Type checking
+mypy superset/                   # Full type check
+mypy superset/charts/            # Check specific module
+```
+
+### Code Style Guidelines
+```python
+# Type hints required
+def create_chart(data: dict[str, Any]) -> Slice:
+    return ChartDAO.create(data)
+
+# Docstrings for public methods
+def complex_business_logic(param: str) -> bool:
+    """
+    Perform complex business logic operation.
+
+    Args:
+        param: Input parameter description
+
+    Returns:
+        Operation success status
+
+    Raises:
+        ValidationError: When param is invalid
+    """
+    pass
+
+# Use f-strings for formatting
+message = f"Processing {count} records"
+
+# Use dataclasses for structured data
+@dataclass
+class ChartConfig:
+    chart_type: str
+    datasource_id: int
+    viz_settings: dict[str, Any]
+```
+
+## Debugging
+
+### Local Debugging
+```python
+# Use Python debugger
+import pdb; pdb.set_trace()
+
+# Or IPython debugger (preferred)
+import IPdb; ipdb.set_trace()
+
+# Log debugging
+import logging
+logger = logging.getLogger(__name__)
+logger.debug("Debug message")
+logger.info("Info message")
+logger.error("Error message")
+```
+
+### Flask Debugging
+```bash
+# Enable debug mode
+export FLASK_ENV=development
+export SUPERSET_CONFIG_PATH=/app/docker/pythonpath_dev/superset_config.py
+
+# Debug specific API endpoints
+curl -X POST http://localhost:8088/api/v1/chart/ \
+  -H "Content-Type: application/json" \
+  -d '{"slice_name": "Test Chart"}'
+```
+
+### Database Query Debugging
+```python
+# Enable SQL logging in config
+SQLALCHEMY_ECHO = True
+
+# Or use Flask-SQLAlchemy query debugging
+from superset import db
+from sqlalchemy import event
+
+@event.listens_for(db.engine, "before_cursor_execute")
+def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    print("SQL:", statement)
+    print("Parameters:", parameters)
+```
+
+## Performance Optimization
+
+### Database Query Optimization
+```python
+# Use eager loading for relationships
+charts = db.session.query(Slice).options(
+    joinedload(Slice.table),
+    joinedload(Slice.owners)
+).all()
+
+# Use bulk operations for large datasets
+db.session.bulk_insert_mappings(Slice, chart_data)
+db.session.commit()
+
+# Optimize N+1 queries
+charts = db.session.query(Slice).options(
+    selectinload(Slice.table)
+).filter(Slice.id.in_(chart_ids)).all()
+```
+
+### Caching Strategies
+```python
+# Use Redis cache for expensive operations
+from superset.extensions import cache_manager
+
+@cache_manager.cache.memoize(timeout=300)
+def expensive_calculation(param: str) -> dict[str, Any]:
+    # Expensive operation
+    return result
+
+# Cache database queries
+from superset.utils.cache import cache
+
+@cache.memoize(timeout=3600)
+def get_cached_chart_data(chart_id: int) -> dict[str, Any]:
+    return ChartDAO.get_chart_data(chart_id)
+```
+
+### Async Operations
+```python
+# Use Celery for long-running tasks
+from superset.tasks.async_queries import load_chart_data_into_cache
+
+# Trigger async task
+task = load_chart_data_into_cache.delay(chart_id, form_data)
+task_id = task.id
+
+# Check task status
+from celery.result import AsyncResult
+result = AsyncResult(task_id)
+if result.ready():
+    data = result.get()
+```
+
+## Best Practices
+
+### Architecture Patterns
+1. **Follow layer boundaries**: API → Commands → DAOs → Models
+2. **Use dependency injection**: Pass dependencies as parameters
+3. **Keep commands focused**: One command per business operation
+4. **Validate early**: Validate inputs at command level
+
+### Error Handling
+```python
+# Use structured exceptions
+try:
+    result = command.run()
+except ValidationError as ex:
+    return jsonify({'error': str(ex)}), 422
+except ForbiddenError as ex:
+    return jsonify({'error': str(ex)}), 403
+except Exception as ex:
+    logger.exception("Unexpected error")
+    return jsonify({'error': 'Internal server error'}), 500
+```
+
+### Security Considerations
+```python
+# Always check permissions
+@has_access_api
+@protect()
+def api_endpoint(self):
+    # Permission automatically checked
+    pass
+
+# Validate input data
+from marshmallow import Schema, fields
+
+class ChartSchema(Schema):
+    slice_name = fields.Str(required=True, validate=Length(min=1, max=255))
+    datasource_id = fields.Int(required=True, validate=Range(min=1))
+
+# Sanitize SQL inputs
+from sqlalchemy.sql import text
+query = text("SELECT * FROM table WHERE id = :id")
+result = db.session.execute(query, {'id': sanitized_id})
+```
+
+### Testing Best Practices
+1. **Write tests first**: TDD approach for new features
+2. **Test edge cases**: Validate error conditions
+3. **Mock external dependencies**: Keep tests fast and reliable
+4. **Use fixtures**: Share test data setup across tests
+5. **Test permissions**: Verify security constraints

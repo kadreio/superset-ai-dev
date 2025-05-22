@@ -1,0 +1,132 @@
+# Backend Documentation Index
+
+Comprehensive guide to Superset's backend development, organized by topic and difficulty level.
+
+## 🚀 Quick Start
+
+**New to Superset Backend?** Start here:
+1. [Architecture Overview](./architecture.mdx) - Understand the layered architecture
+2. [Development Setup](./development.mdx#development-environment) - Get your environment running
+3. [Your First Feature](./cookbook.mdx#creating-your-first-feature) - Build something simple
+4. [Testing Basics](./testing.mdx#writing-new-tests) - Write your first tests
+
+## 📚 Core Topics
+
+### **Architecture & Patterns** 🏗️
+- [**Architecture Overview**](./architecture.mdx) - Layered architecture, data flow, patterns
+- [**Command Pattern**](./commands.mdx) - Business logic encapsulation
+- [**Database Layer**](./database.mdx) - Models, DAOs, relationships, migrations
+- [**API Development**](./api.mdx) - REST API patterns and best practices
+
+### **Development Workflow** 🔧
+- [**Development Guide**](./development.mdx) - Setup, workflow, debugging
+- [**Testing Strategy**](./testing.mdx) - Unit, integration, and E2E testing
+- [**Code Quality Tools**](./utilities.mdx) - Linting, formatting, type checking
+- [**Configuration**](./configuration.mdx) - Environment setup, feature flags
+
+### **Advanced Topics** 🚀
+- [**Async & Background Tasks**](./async-tasks.mdx) - Celery, queues, monitoring
+- [**Query Execution Pipeline**](./query-pipeline.mdx) - How queries flow through the system
+- [**Security & Permissions**](./security.mdx) - RBAC, authentication, authorization
+- [**Plugin Development**](./plugins.mdx) - Extending Superset capabilities
+
+### **Production & Operations** 🏭
+- [**Performance Optimization**](./performance.mdx) - Query tuning, caching, scaling
+- [**Deployment Patterns**](./deployment.mdx) - Docker, Kubernetes, cloud deployment
+- [**Monitoring & Observability**](./observability.mdx) - Metrics, logging, alerting
+- [**Troubleshooting Guide**](./troubleshooting.mdx) - Common issues and solutions
+
+## 🎯 By Use Case
+
+### **I Want To...**
+- **Add a new chart type** → [Plugin Development](./plugins.mdx#custom-visualization-plugins)
+- **Connect to a new database** → [Database Engine Specs](./database.mdx#database-engine-specs)
+- **Implement custom authentication** → [Security Integration](./security.mdx#authentication-integration)
+- **Optimize slow queries** → [Performance Guide](./performance.mdx#query-optimization)
+- **Add background jobs** → [Async Tasks](./async-tasks.mdx#creating-background-tasks)
+- **Debug production issues** → [Troubleshooting](./troubleshooting.mdx)
+- **Set up CI/CD** → [Development Tools](./utilities.mdx#continuous-integration)
+
+### **I'm Working On...**
+- **API endpoints** → [API Development](./api.mdx)
+- **Database changes** → [Database Layer](./database.mdx#database-migrations)
+- **Business logic** → [Command Pattern](./commands.mdx)
+- **User permissions** → [Security & Permissions](./security.mdx)
+- **Performance issues** → [Performance Optimization](./performance.mdx)
+- **Test coverage** → [Testing Strategy](./testing.mdx)
+
+## 📖 Learning Paths
+
+### **🟢 Beginner (New to Superset)**
+1. [Architecture Overview](./architecture.mdx) - Core concepts
+2. [Development Setup](./development.mdx) - Environment setup
+3. [Database Basics](./database.mdx#models--relationships) - Understanding models
+4. [Simple API](./api.mdx#standard-endpoints) - Basic CRUD operations
+5. [Basic Testing](./testing.mdx#writing-new-tests) - Unit test patterns
+
+### **🟡 Intermediate (Some Backend Experience)**
+1. [Command Pattern](./commands.mdx) - Business logic organization
+2. [Advanced APIs](./api.mdx#custom-api-endpoints) - Custom endpoints
+3. [Security Implementation](./security.mdx#resource-level-permissions) - Permissions
+4. [Query Pipeline](./query-pipeline.mdx) - Data flow understanding
+5. [Performance Basics](./performance.mdx#database-query-optimization) - Optimization
+
+### **🔴 Advanced (Experienced Developer)**
+1. [Plugin Architecture](./plugins.mdx) - Extending Superset
+2. [Async Tasks](./async-tasks.mdx) - Background processing
+3. [Advanced Security](./security.mdx#row-level-security) - RLS implementation
+4. [Production Deployment](./deployment.mdx) - Scaling and operations
+5. [Performance Tuning](./performance.mdx#advanced-optimization) - Deep optimization
+
+## 🔍 Quick Reference
+
+### **Common Commands**
+```bash
+# Development
+make flask-app                   # Start backend
+pytest tests/unit_tests/         # Run unit tests
+ruff check .                     # Lint code
+superset db upgrade              # Apply migrations
+
+# Database
+superset db migrate -m "message" # Create migration
+superset init                    # Initialize permissions
+superset load-examples           # Load sample data
+
+# Testing
+scripts/tests/run.sh             # Integration tests
+pytest -k "test_name"            # Run specific test
+pytest --cov=superset            # Coverage report
+```
+
+### **Key Patterns**
+- **Command**: `CreateChartCommand(user, data).run()`
+- **DAO**: `ChartDAO.find_by_id(chart_id)`
+- **API**: `@expose('/endpoint') @protect()`
+- **Security**: `security_manager.can_access_chart(chart)`
+- **Cache**: `@cache.memoize(timeout=300)`
+
+### **Important Files**
+- `/superset/models/` - Database models
+- `/superset/commands/` - Business logic
+- `/superset/views/` - API endpoints
+- `/superset/daos/` - Data access objects
+- `/superset/db_engine_specs/` - Database connectors
+
+## 🆘 Need Help?
+
+### **Common Issues**
+- **Setup Problems** → [Development Guide](./development.mdx#troubleshooting-common-issues)
+- **Test Failures** → [Testing Troubleshooting](./testing.mdx#troubleshooting-common-issues)
+- **Performance Issues** → [Performance Guide](./performance.mdx#identifying-bottlenecks)
+- **Security Errors** → [Security Troubleshooting](./security.mdx#troubleshooting-permissions)
+
+### **Getting Deeper**
+- **Flask-AppBuilder** → [Official Docs](https://flask-appbuilder.readthedocs.io/)
+- **SQLAlchemy** → [Official Docs](https://docs.sqlalchemy.org/)
+- **Celery** → [Official Docs](https://docs.celeryproject.org/)
+- **Superset Contributing** → [CONTRIBUTING.md](../../../../CONTRIBUTING.md)
+
+---
+
+💡 **Tip**: Use your browser's search (Ctrl+F) to quickly find topics on this page, or use the search in your IDE to find specific patterns across all documentation files.

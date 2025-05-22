@@ -1,0 +1,414 @@
+# Development Utilities
+
+Comprehensive guide to development tools, linting, formatting, type checking, and other utilities for Superset backend development.
+
+## Code Quality Tools
+
+### Ruff (Primary Linter & Formatter)
+Ruff replaces multiple tools (flake8, isort, black) with a single, fast implementation.
+
+```bash
+# Linting
+ruff check .                     # Check entire codebase
+ruff check superset/             # Check specific directory
+ruff check --fix .               # Auto-fix issues
+ruff check --fix-only            # Only fix, don't report unfixable
+
+# Formatting
+ruff format .                    # Format entire codebase
+ruff format superset/charts/     # Format specific directory
+ruff format --check .            # Check if formatting needed
+```
+
+#### Configuration (pyproject.toml)
+```toml
+[tool.ruff]
+target-version = "py38"
+line-length = 88
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function calls in argument defaults
+]
+
+[tool.ruff.isort]
+known-first-party = ["superset"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+```
+
+### MyPy (Type Checking)
+```bash
+# Type checking
+mypy superset/                   # Check entire backend
+mypy superset/charts/            # Check specific module
+mypy --strict superset/models/   # Strict type checking
+mypy --install-types             # Install missing type stubs
+```
+
+#### Configuration (pyproject.toml)
+```toml
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+
+# Per-module configuration
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+```
+
+### Pre-commit Hooks
+Automated code quality checks on every commit.
+
+```bash
+# Setup (run once)
+pre-commit install
+
+# Manual execution
+pre-commit run --all-files       # Run all hooks
+pre-commit run ruff              # Run specific hook
+pre-commit run --files superset/charts/api.py  # Run on specific file
+
+# Update hook versions
+pre-commit autoupdate
+```
+
+#### Configuration (.pre-commit-config.yaml)
+```yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.3
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.5.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.0.3
+    hooks:
+      - id: prettier
+        files: \.(js|jsx|ts|tsx|css|scss|json|yaml|yml|md)$
+```
+
+## Build & Development Tools
+
+### Makefile Commands
+```bash
+# Development
+make install                     # Complete setup with examples
+make update                      # Update dependencies
+make flask-app                   # Start backend server
+make format                      # Format all code (Python + JS)
+
+# Testing
+make test                        # Run all tests
+make test-py                     # Python tests only
+make test-js                     # JavaScript tests only
+
+# Database
+make db-upgrade                  # Apply migrations
+make load-examples               # Load example data
+
+# Cleanup
+make clean                       # Remove build artifacts
+make clean-pyc                   # Remove Python cache files
+```
+
+### Dependency Management
+
+#### UV (Fast Python Package Manager)
+```bash
+# Install dependencies
+uv pip install -r requirements/development.txt
+
+# Compile requirements
+scripts/uv-pip-compile.sh        # Compile all requirement files
+
+# Add new dependency
+echo "new-package==1.0.0" >> requirements/base.in
+scripts/uv-pip-compile.sh
+```
+
+#### Requirements Structure
+```
+requirements/
+├── base.in                      # Core dependencies
+├── base.txt                     # Compiled core dependencies
+├── development.in               # Development dependencies
+├── development.txt              # Compiled dev dependencies
+├── translations.in              # Translation dependencies
+└── translations.txt             # Compiled translation dependencies
+```
+
+### Database Tools
+
+#### Alembic (Database Migrations)
+```bash
+# Create migration
+superset db migrate -m "Add new table"
+
+# Apply migrations
+superset db upgrade
+
+# Rollback migration
+superset db downgrade -1
+
+# Show current revision
+superset db current
+
+# Show migration history
+superset db history
+```
+
+#### Database Utilities
+```bash
+# Initialize database
+superset db upgrade
+superset init
+
+# Load sample data
+superset load-examples
+
+# Create admin user
+superset fab create-admin
+
+# Database shell
+superset db shell
+```
+
+## Testing Tools
+
+### Pytest Configuration
+```bash
+# Run tests with different options
+pytest -v                        # Verbose output
+pytest -x                        # Stop on first failure
+pytest --lf                      # Run last failed tests
+pytest --tb=short                # Shorter traceback
+pytest -n auto                   # Parallel testing
+pytest --cov=superset            # Coverage report
+
+# Test markers
+pytest -m "not slow"             # Skip slow tests
+pytest -m "unit"                 # Run only unit tests
+pytest -m "integration"          # Run only integration tests
+```
+
+### Coverage Tools
+```bash
+# Generate coverage report
+pytest --cov=superset --cov-report=html tests/
+
+# Coverage configuration in pyproject.toml
+[tool.coverage.run]
+source = ["superset"]
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "*/node_modules/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "if TYPE_CHECKING:"
+]
+```
+
+### Test Utilities
+```bash
+# Run specific test categories
+scripts/tests/run.sh              # All integration tests
+scripts/python_tests.sh           # Integration with coverage
+pytest tests/unit_tests/          # Unit tests only
+
+# Database test utilities
+scripts/tests/run_db_tests.sh     # Database-specific tests
+pytest tests/integration_tests/base_tests.py  # Base test utilities
+```
+
+## Performance & Monitoring
+
+### Profiling Tools
+```python
+# Memory profiling
+import tracemalloc
+tracemalloc.start()
+# ... code to profile ...
+current, peak = tracemalloc.get_traced_memory()
+print(f"Current: {current / 1024 / 1024:.1f} MB")
+print(f"Peak: {peak / 1024 / 1024:.1f} MB")
+
+# CPU profiling
+import cProfile
+import pstats
+
+pr = cProfile.Profile()
+pr.enable()
+# ... code to profile ...
+pr.disable()
+stats = pstats.Stats(pr)
+stats.sort_stats('cumulative').print_stats(10)
+```
+
+### Database Query Profiling
+```python
+# Enable SQL logging
+SQLALCHEMY_ECHO = True
+
+# Query profiling
+from sqlalchemy import event
+from time import time
+
+@event.listens_for(db.engine, "before_cursor_execute")
+def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    context._query_start_time = time()
+
+@event.listens_for(db.engine, "after_cursor_execute")
+def receive_after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    total = time() - context._query_start_time
+    print(f"Query Time: {total:.4f}s")
+```
+
+## Development Scripts
+
+### Custom Development Scripts
+```bash
+# Check environment
+scripts/check-env.py             # Verify development environment
+
+# License checking
+scripts/check_license.sh         # Verify license headers
+
+# Benchmarking
+scripts/benchmark_migration.py   # Benchmark database migrations
+
+# Utility scripts
+scripts/translations/babel_update.sh    # Update translations
+scripts/generate_frontend_ts_tasklist.js # Generate TypeScript tasks
+```
+
+### Configuration Files
+
+#### pyproject.toml (Main Configuration)
+```toml
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+
+[project]
+name = "apache-superset"
+dynamic = ["version"]
+description = "A modern, enterprise-ready business intelligence web application"
+readme = "README.md"
+license = {text = "Apache License 2.0"}
+requires-python = ">=3.8"
+
+[tool.setuptools_scm]
+write_to = "superset/_version.py"
+
+[tool.ruff]
+# Ruff configuration
+
+[tool.mypy]
+# MyPy configuration
+
+[tool.pytest.ini_options]
+# Pytest configuration
+```
+
+#### Setup Configuration Files
+```bash
+# Core configuration files
+pyproject.toml                   # Main Python configuration
+setup.py                        # Legacy setup (being phased out)
+requirements/                    # Dependency specifications
+pytest.ini                      # Pytest configuration
+.pre-commit-config.yaml          # Pre-commit hook configuration
+Makefile                         # Development commands
+```
+
+## Continuous Integration
+
+### GitHub Actions Utilities
+```bash
+# CI-related scripts
+scripts/ci_check_npm_lock_version.sh  # Check npm lock version
+scripts/cancel_github_workflows.py    # Cancel running workflows
+scripts/change_detector.py            # Detect changes for CI
+```
+
+### Local CI Simulation
+```bash
+# Run CI checks locally
+make format                      # Format code
+make lint                        # Lint code
+make test                        # Run tests
+make build                       # Build application
+
+# Pre-commit simulation
+pre-commit run --all-files       # Run all quality checks
+```
+
+## Best Practices
+
+### Tool Usage Guidelines
+1. **Use ruff for all linting/formatting** - Single tool for consistency
+2. **Run mypy regularly** - Type checking prevents runtime errors
+3. **Enable pre-commit hooks** - Automatic quality checks
+4. **Profile before optimizing** - Measure performance bottlenecks
+5. **Use proper test categories** - Unit tests for development, integration for CI
+
+### Development Workflow
+1. **Format code before committing** - `make format`
+2. **Run relevant tests** - Unit tests during development
+3. **Check types regularly** - `mypy superset/`
+4. **Use proper Python versions** - Python 3.8+ required
+5. **Keep dependencies updated** - Regular `make update`
+
+### Troubleshooting Common Issues
+```bash
+# Dependency conflicts
+pip install --upgrade pip
+uv pip install -r requirements/development.txt
+
+# Database issues
+superset db upgrade
+superset init
+
+# Cache issues
+make clean
+make clean-pyc
+
+# Type checking errors
+mypy --install-types
+mypy --ignore-missing-imports superset/
+```

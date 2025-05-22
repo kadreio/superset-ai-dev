@@ -1,0 +1,381 @@
+# Frontend Testing Guide
+
+Comprehensive testing strategy for Superset's React frontend, covering unit tests, integration tests, and end-to-end testing.
+
+## Testing Overview
+
+Superset frontend uses a **multi-layer testing approach**:
+
+- **Unit Tests**: Component logic and utility functions
+- **Integration Tests**: Feature workflows and API interactions
+- **End-to-End Tests**: Complete user journeys with Cypress
+- **Visual Tests**: Component consistency with Storybook
+
+## Test Configuration
+
+### Jest Configuration
+
+Located in `jest.config.js`:
+
+```javascript
+{
+  testRegex: '\\/(spec|src|plugins|packages)\\/.*(_spec|\\.test)\\.[jt]sx?$',
+  testEnvironment: 'jsdom',
+  setupFilesAfterEnv: ['<rootDir>/spec/helpers/setup.ts'],
+  moduleNameMapper: {
+    '^src/(.*)$': '<rootDir>/src/$1',
+    '@superset-ui/(.*)$': '<rootDir>/node_modules/@superset-ui/$1/src',
+  },
+  transformIgnorePatterns: [/* modern ES modules */],
+  collectCoverageFrom: [
+    'src/**/*.{js,jsx,ts,tsx}',
+    '{packages,plugins}/**/src/**/*.{js,jsx,ts,tsx}',
+    '!**/*.stories.*'
+  ]
+}
+```
+
+### Testing Environment Setup
+
+**Setup file** (`spec/helpers/setup.ts`):
+- Testing Library matchers
+- Enzyme adapter configuration
+- Global mocks and polyfills
+- Theme provider setup
+
+## Unit Testing
+
+### Component Testing with React Testing Library
+
+**Basic Component Test:**
+```typescript
+import { render, screen } from 'spec/helpers/testing-library';
+import Button from 'src/components/Button';
+
+test('renders button with correct text', () => {
+  render(<Button>Click me</Button>);
+  expect(screen.getByRole('button')).toHaveTextContent('Click me');
+});
+```
+
+**Testing User Interactions:**
+```typescript
+import userEvent from '@testing-library/user-event';
+
+test('calls onClick when button is clicked', async () => {
+  const user = userEvent.setup();
+  const handleClick = jest.fn();
+
+  render(<Button onClick={handleClick}>Click me</Button>);
+  await user.click(screen.getByRole('button'));
+
+  expect(handleClick).toHaveBeenCalledTimes(1);
+});
+```
+
+### Testing with Redux
+
+**Component with Redux State:**
+```typescript
+import { render } from 'spec/helpers/testing-library';
+import configureStore from 'redux-mock-store';
+import { Provider } from 'react-redux';
+
+const mockStore = configureStore();
+
+test('component with redux state', () => {
+  const store = mockStore({
+    user: { userId: 1, username: 'admin' }
+  });
+
+  render(
+    <Provider store={store}>
+      <ComponentWithRedux />
+    </Provider>
+  );
+});
+```
+
+### Testing Hooks
+
+**Custom Hook Testing:**
+```typescript
+import { renderHook } from '@testing-library/react-hooks';
+import { useDebounceValue } from 'src/hooks/useDebounceValue';
+
+test('debounces value changes', async () => {
+  const { result, rerender } = renderHook(
+    ({ value, delay }) => useDebounceValue(value, delay),
+    { initialProps: { value: 'initial', delay: 100 } }
+  );
+
+  expect(result.current).toBe('initial');
+
+  rerender({ value: 'updated', delay: 100 });
+  // Value should not change immediately
+  expect(result.current).toBe('initial');
+
+  // Wait for debounce
+  await waitFor(() => {
+    expect(result.current).toBe('updated');
+  }, { timeout: 200 });
+});
+```
+
+## Testing Patterns
+
+### Mock Management
+
+**API Mocks** (`spec/fixtures/`):
+```typescript
+// mockCharts.ts
+export const mockChart = {
+  id: 1,
+  slice_name: 'Test Chart',
+  viz_type: 'table',
+  // ... chart properties
+};
+```
+
+**Module Mocks** (`spec/__mocks__/`):
+```typescript
+// svgrMock.tsx - SVG import mock
+import React from 'react';
+const SvgrMock = React.forwardRef<HTMLSpanElement>((props, ref) => (
+  <span ref={ref} {...props} />
+));
+export default SvgrMock;
+```
+
+### Testing Async Operations
+
+**Testing with Async State:**
+```typescript
+import { waitFor } from '@testing-library/react';
+
+test('loads data async', async () => {
+  render(<AsyncComponent />);
+
+  // Initially shows loading
+  expect(screen.getByText('Loading...')).toBeInTheDocument();
+
+  // Wait for data to load
+  await waitFor(() => {
+    expect(screen.getByText('Data loaded')).toBeInTheDocument();
+  });
+});
+```
+
+### Error Boundary Testing
+
+**Testing Error States:**
+```typescript
+import { ErrorBoundary } from 'src/components/ErrorBoundary';
+
+test('catches errors and shows fallback', () => {
+  const ThrowError = () => {
+    throw new Error('Test error');
+  };
+
+  render(
+    <ErrorBoundary>
+      <ThrowError />
+    </ErrorBoundary>
+  );
+
+  expect(screen.getByText(/Something went wrong/)).toBeInTheDocument();
+});
+```
+
+## Integration Testing
+
+### API Integration Tests
+
+**Testing API Calls:**
+```typescript
+import fetchMock from 'fetch-mock';
+import { SupersetClient } from '@superset-ui/core';
+
+test('fetches chart data', async () => {
+  fetchMock.get('/api/v1/chart/123/data', { data: [] });
+
+  const response = await SupersetClient.get({
+    endpoint: '/api/v1/chart/123/data'
+  });
+
+  expect(response.json.data).toEqual([]);
+  fetchMock.restore();
+});
+```
+
+### Feature Workflow Tests
+
+**Multi-step User Flows:**
+```typescript
+test('dashboard filter workflow', async () => {
+  const user = userEvent.setup();
+  render(<Dashboard />);
+
+  // Apply filter
+  await user.click(screen.getByLabelText('Country filter'));
+  await user.click(screen.getByText('USA'));
+
+  // Verify charts update
+  await waitFor(() => {
+    expect(screen.getByText('Filtered results')).toBeInTheDocument();
+  });
+});
+```
+
+## End-to-End Testing (Cypress)
+
+### Cypress Configuration
+
+Located in `cypress-base/cypress.config.ts`:
+
+```typescript
+export default defineConfig({
+  e2e: {
+    baseUrl: 'http://localhost:8088',
+    supportFile: 'cypress/support/e2e.ts',
+    viewportWidth: 1280,
+    viewportHeight: 720,
+  },
+  component: {
+    devServer: { framework: 'react', bundler: 'webpack' }
+  }
+});
+```
+
+### E2E Test Examples
+
+**Dashboard Interaction:**
+```typescript
+// cypress/e2e/dashboard.test.ts
+describe('Dashboard', () => {
+  beforeEach(() => {
+    cy.login('admin', 'admin');
+    cy.visit('/dashboard/1/');
+  });
+
+  it('applies native filters', () => {
+    cy.get('[data-test="filter-bar"]').should('be.visible');
+    cy.get('[data-test="filter-control"]').first().click();
+    cy.get('[data-test="filter-option"]').first().click();
+
+    // Verify filter application
+    cy.get('[data-test="chart-container"]').should('contain', 'Filtered');
+  });
+});
+```
+
+**Explore Interface:**
+```typescript
+describe('Explore', () => {
+  it('creates new chart', () => {
+    cy.visit('/explore/?dataset_type=table&dataset_id=1');
+
+    // Configure chart
+    cy.get('[data-test="control-viz_type"]').click();
+    cy.get('[data-test="viz-type-bar"]').click();
+
+    cy.get('[data-test="query-run-button"]').click();
+
+    // Verify chart renders
+    cy.get('[data-test="chart-container"] svg').should('be.visible');
+  });
+});
+```
+
+## Testing Commands
+
+### Running Tests
+
+**Unit Tests:**
+```bash
+# Run all tests
+npm run test
+
+# Run tests in watch mode
+npm run tdd
+
+# Run tests with coverage
+npm run cover
+
+# Run specific test file
+npm test -- ComponentName.test.tsx
+
+# Run tests matching pattern
+npm test -- --testNamePattern="should render"
+```
+
+**Type Checking:**
+```bash
+# TypeScript type checking
+npm run type
+
+# ESLint + TypeScript
+npm run lint
+```
+
+**E2E Tests:**
+```bash
+# Build for Cypress
+npm run build-instrumented
+
+# Run Cypress tests (from root)
+make build-cypress && make open-cypress
+```
+
+## Test Organization
+
+### File Structure
+
+```
+spec/
+├── fixtures/              # Mock data and state
+│   ├── mockCharts.ts
+│   ├── mockDashboards.js
+│   └── mockState.js
+├── helpers/               # Test utilities
+│   ├── setup.ts          # Jest setup
+│   ├── testing-library.tsx # RTL helpers
+│   └── waitForComponentToPaint.ts
+└── __mocks__/             # Module mocks
+    ├── svgrMock.tsx
+    └── mockExportString.js
+
+src/
+└── components/
+    └── ComponentName/
+        ├── ComponentName.test.tsx
+        └── ComponentName.stories.tsx
+```
+
+### Testing Best Practices
+
+**Component Testing:**
+- Test behavior, not implementation
+- Use semantic queries (`getByRole`, `getByLabelText`)
+- Mock external dependencies
+- Test accessibility and keyboard navigation
+
+**Integration Testing:**
+- Test feature workflows end-to-end
+- Mock network requests consistently
+- Test error states and edge cases
+- Verify state changes and side effects
+
+**E2E Testing:**
+- Test critical user journeys
+- Use data-test attributes for stability
+- Test across different browsers/viewports
+- Focus on core functionality over edge cases
+
+**Performance Testing:**
+- Test component render times
+- Monitor bundle size impacts
+- Test with realistic data volumes
+- Profile memory usage in tests
+
+This testing strategy ensures high code quality, feature reliability, and confidence in deployments across the Superset frontend codebase.

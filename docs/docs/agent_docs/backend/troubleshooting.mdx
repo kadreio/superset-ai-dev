@@ -1,0 +1,747 @@
+# Troubleshooting Guide
+
+Common issues, error patterns, and step-by-step solutions for Superset backend development and production problems.
+
+## 🚨 Common Issues & Quick Fixes
+
+### Database Connection Issues
+
+#### Error: "Connection refused" or "Database not found"
+```bash
+# Check database connectivity
+superset db upgrade  # Apply migrations
+superset init        # Initialize roles/permissions
+
+# Verify configuration
+echo $DATABASE_URL
+# Should output: postgresql://user:pass@host:port/dbname
+
+# Test connection manually
+psql $DATABASE_URL -c "SELECT 1;"
+```
+
+**Solution Steps:**
+1. Verify database server is running
+2. Check connection string format
+3. Ensure database exists and user has permissions
+4. Verify network connectivity (especially in containers)
+
+#### Error: "relation does not exist"
+```bash
+# Check migration status
+superset db current
+superset db history
+
+# Apply missing migrations
+superset db upgrade
+
+# If migrations are corrupted, get help
+superset db show
+```
+
+**Root Causes:**
+- Missing migrations
+- Database schema out of sync
+- Wrong database selected
+
+### Permission & Security Errors
+
+#### Error: "Access denied" or "Forbidden"
+```python
+# Debug permission issues
+from superset.security.manager import security_manager
+
+# Check user roles
+user = security_manager.find_user('username')
+print([role.name for role in user.roles])
+
+# Check specific permissions
+print(security_manager.has_access('can_read', 'Chart'))
+print(security_manager.can_access_chart(chart))
+
+# Check RLS filters
+rls_filters = security_manager.get_rls_filters(datasource)
+print(f"Active RLS filters: {len(rls_filters)}")
+```
+
+**Solution Steps:**
+1. Verify user has correct roles
+2. Check role permissions in Admin > Security
+3. Ensure proper ownership of resources
+4. Review row-level security filters
+
+#### Error: "CSRF token missing"
+```python
+# In superset_config.py
+WTF_CSRF_ENABLED = True
+WTF_CSRF_TIME_LIMIT = 3600
+
+# Check CSRF configuration
+SECRET_KEY = 'your-secret-key-here'  # Must be consistent across restarts
+```
+
+### Cache Issues
+
+#### Error: "Redis connection failed" or stale cache
+```bash
+# Check Redis connectivity
+redis-cli ping
+# Should return: PONG
+
+# Clear cache manually
+redis-cli FLUSHDB
+
+# Check cache configuration
+grep -r "CACHE_CONFIG" superset_config.py
+```
+
+```python
+# Clear specific cache patterns
+from superset.utils.cache import cache
+cache.delete_many_by_pattern("chart_data_*")
+cache.delete_many_by_pattern("dashboard_*")
+```
+
+### Celery/Async Task Issues
+
+#### Error: "Celery worker not responding"
+```bash
+# Check worker status
+celery -A superset.tasks.celery_app:celery_app inspect active
+
+# Start worker manually for debugging
+celery -A superset.tasks.celery_app:celery_app worker --loglevel=debug
+
+# Check broker connectivity
+python -c "
+import redis
+r = redis.Redis(host='localhost', port=6379, db=0)
+print(r.ping())
+"
+```
+
+#### Error: "Task timeout" or "Task never completes"
+```python
+# Check task configuration
+CELERY_CONFIG = {
+    'task_soft_time_limit': 300,  # 5 minutes
+    'task_time_limit': 600,       # 10 minutes hard limit
+    'worker_max_tasks_per_child': 1000,
+}
+
+# Debug specific task
+from celery.result import AsyncResult
+result = AsyncResult('task-id-here')
+print(f"State: {result.state}")
+print(f"Info: {result.info}")
+```
+
+## 🔍 Diagnostic Tools
+
+### Health Check Commands
+```bash
+# Complete health check script
+#!/bin/bash
+echo "=== Superset Health Check ==="
+
+echo "1. Database connectivity:"
+superset db current 2>&1 | head -5
+
+echo "2. Cache connectivity:"
+python -c "
+from superset.utils.cache import cache
+try:
+    cache.set('test', 'ok', timeout=10)
+    result = cache.get('test')
+    print(f'Cache: {\"OK\" if result == \"ok\" else \"FAILED\"}')
+except Exception as e:
+    print(f'Cache: FAILED - {e}')
+"
+
+echo "3. Celery workers:"
+celery -A superset.tasks.celery_app:celery_app inspect active | grep -c "uuid" || echo "No active workers"
+
+echo "4. Configuration:"
+python -c "
+from superset import app
+print(f'Debug mode: {app.config.get(\"DEBUG\", False)}')
+print(f'Database: {app.config.get(\"SQLALCHEMY_DATABASE_URI\", \"Not set\")[:50]}...')
+print(f'Secret key: {\"Set\" if app.config.get(\"SECRET_KEY\") else \"Not set\"}')
+"
+
+echo "5. Import test:"
+python -c "
+try:
+    from superset import app
+    print('Import: OK')
+except Exception as e:
+    print(f'Import: FAILED - {e}')
+"
+```
+
+### Performance Diagnostics
+```python
+# /superset/utils/diagnostics.py
+import time
+import psutil
+import logging
+from typing import Dict, Any
+
+class PerformanceDiagnostics:
+    """Tools for diagnosing performance issues."""
+
+    @staticmethod
+    def check_system_resources() -> Dict[str, Any]:
+        """Check system resource usage."""
+        return {
+            'cpu_percent': psutil.cpu_percent(interval=1),
+            'memory_percent': psutil.virtual_memory().percent,
+            'disk_percent': psutil.disk_usage('/').percent,
+            'load_average': psutil.getloadavg() if hasattr(psutil, 'getloadavg') else None
+        }
+
+    @staticmethod
+    def check_database_performance() -> Dict[str, Any]:
+        """Check database performance metrics."""
+        from superset import db
+
+        start_time = time.time()
+
+        # Simple query test
+        try:
+            db.session.execute(text("SELECT 1")).fetchone()
+            query_time = time.time() - start_time
+
+            # Connection pool info
+            pool = db.engine.pool
+            pool_info = {
+                'size': pool.size(),
+                'checked_in': pool.checkedin(),
+                'checked_out': pool.checkedout(),
+                'overflow': pool.overflow(),
+            }
+
+            return {
+                'status': 'healthy',
+                'query_time': query_time,
+                'pool_info': pool_info
+            }
+        except Exception as e:
+            return {
+                'status': 'error',
+                'error': str(e),
+                'query_time': time.time() - start_time
+            }
+
+    @staticmethod
+    def check_cache_performance() -> Dict[str, Any]:
+        """Check cache performance."""
+        from superset.utils.cache import cache
+
+        start_time = time.time()
+        test_key = f"health_check_{int(time.time())}"
+
+        try:
+            # Write test
+            cache.set(test_key, 'test_value', timeout=60)
+            write_time = time.time() - start_time
+
+            # Read test
+            start_time = time.time()
+            result = cache.get(test_key)
+            read_time = time.time() - start_time
+
+            # Cleanup
+            cache.delete(test_key)
+
+            return {
+                'status': 'healthy' if result == 'test_value' else 'error',
+                'write_time': write_time,
+                'read_time': read_time
+            }
+        except Exception as e:
+            return {
+                'status': 'error',
+                'error': str(e)
+            }
+
+    @staticmethod
+    def check_slow_queries(threshold_seconds: float = 1.0) -> list[Dict[str, Any]]:
+        """Get recent slow queries."""
+        # This would typically query a performance monitoring table
+        # Placeholder implementation
+        return []
+
+# Usage in API endpoint
+@expose('/health/diagnostics', methods=['GET'])
+@protect()
+def get_diagnostics(self) -> Response:
+    """Get system diagnostics."""
+    diagnostics = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'system': PerformanceDiagnostics.check_system_resources(),
+        'database': PerformanceDiagnostics.check_database_performance(),
+        'cache': PerformanceDiagnostics.check_cache_performance(),
+        'slow_queries': PerformanceDiagnostics.check_slow_queries()
+    }
+
+    return self.response(200, result=diagnostics)
+```
+
+### Log Analysis Tools
+```bash
+# Analyze error patterns in logs
+grep -E "(ERROR|CRITICAL)" /app/superset_home/logs/superset.log | \
+    tail -100 | \
+    cut -d' ' -f4- | \
+    sort | uniq -c | sort -nr
+
+# Find slow queries
+grep "Slow query" /app/superset_home/logs/superset.log | \
+    grep -o "([0-9.]*s)" | \
+    sort -nr | head -10
+
+# Check for memory issues
+grep -i "memory\|oom\|killed" /app/superset_home/logs/superset.log
+
+# Analyze API errors by endpoint
+grep "POST\|GET\|PUT\|DELETE" /app/superset_home/logs/superset.log | \
+    grep -E " [45][0-9][0-9] " | \
+    awk '{print $7}' | sort | uniq -c | sort -nr
+```
+
+## 🛠️ Specific Problem Solutions
+
+### Chart/Visualization Issues
+
+#### Problem: "Chart data not loading"
+**Diagnostic Steps:**
+```python
+# 1. Check chart configuration
+chart = ChartDAO.find_by_id(chart_id)
+print(f"Chart: {chart.slice_name}")
+print(f"Datasource: {chart.datasource}")
+print(f"Query context: {chart.query_context}")
+
+# 2. Test query execution
+if chart.query_context:
+    from superset.commands.chart.data import ChartDataCommand
+    command = ChartDataCommand(chart, json.loads(chart.query_context))
+    try:
+        result = command.run()
+        print(f"Query successful: {len(result.get('data', []))} rows")
+    except Exception as e:
+        print(f"Query failed: {e}")
+
+# 3. Check permissions
+from superset.security.manager import security_manager
+print(f"Can access chart: {security_manager.can_access_chart(chart)}")
+print(f"Can access datasource: {security_manager.can_access_datasource(chart.datasource)}")
+```
+
+**Common Solutions:**
+- Check datasource connectivity
+- Verify user permissions
+- Clear chart cache
+- Check for RLS filters blocking data
+
+#### Problem: "Slow chart loading"
+**Performance Analysis:**
+```python
+# Profile chart query
+import time
+from superset.commands.chart.data import ChartDataCommand
+
+start_time = time.time()
+command = ChartDataCommand(chart, json.loads(chart.query_context))
+result = command.run()
+execution_time = time.time() - start_time
+
+print(f"Execution time: {execution_time:.2f}s")
+print(f"Row count: {len(result.get('data', []))}")
+print(f"Query: {chart.datasource.last_query}")
+
+# Check cache status
+cache_key = command._generate_cache_key()
+cached_result = cache.get(cache_key)
+print(f"Cached: {'Yes' if cached_result else 'No'}")
+```
+
+**Optimization Steps:**
+1. Add database indexes on filtered columns
+2. Implement query result caching
+3. Add row limits to large datasets
+4. Optimize SQL query structure
+
+### Dashboard Issues
+
+#### Problem: "Dashboard not loading" or "Partial dashboard loading"
+```python
+# Debug dashboard loading
+dashboard = DashboardDAO.find_by_id(dashboard_id)
+print(f"Dashboard: {dashboard.dashboard_title}")
+print(f"Charts: {len(dashboard.slices)}")
+
+# Check each chart
+for chart in dashboard.slices:
+    try:
+        # Test chart data loading
+        if chart.query_context:
+            command = ChartDataCommand(chart, json.loads(chart.query_context))
+            result = command.run()
+            print(f"✓ Chart {chart.id}: {chart.slice_name}")
+        else:
+            print(f"⚠ Chart {chart.id}: No query context")
+    except Exception as e:
+        print(f"✗ Chart {chart.id}: {e}")
+
+# Check dashboard permissions
+print(f"Can access dashboard: {security_manager.can_access_dashboard(dashboard)}")
+```
+
+#### Problem: "Dashboard filter not working"
+```python
+# Debug native filters
+import json
+
+dashboard = DashboardDAO.find_by_id(dashboard_id)
+metadata = json.loads(dashboard.json_metadata or '{}')
+native_filters = metadata.get('native_filter_configuration', [])
+
+print(f"Native filters configured: {len(native_filters)}")
+for filter_config in native_filters:
+    print(f"Filter: {filter_config.get('name', 'Unnamed')}")
+    print(f"  Type: {filter_config.get('filterType')}")
+    print(f"  Targets: {len(filter_config.get('targets', []))}")
+```
+
+### Database Connection Issues
+
+#### Problem: "Connection pool exhausted"
+```python
+# Check connection pool status
+from superset import db
+
+pool = db.engine.pool
+print(f"Pool size: {pool.size()}")
+print(f"Checked out: {pool.checkedout()}")
+print(f"Overflow: {pool.overflow()}")
+print(f"Checked in: {pool.checkedin()}")
+
+# Configure larger pool
+SQLALCHEMY_ENGINE_OPTIONS = {
+    'pool_size': 20,
+    'max_overflow': 30,
+    'pool_pre_ping': True,
+    'pool_recycle': 3600
+}
+```
+
+#### Problem: "Database timeout errors"
+```python
+# Increase timeout settings
+SQLALCHEMY_ENGINE_OPTIONS = {
+    'connect_args': {
+        'connect_timeout': 60,
+        'server_side_cursors': True
+    }
+}
+
+# For specific queries
+def execute_with_timeout(sql: str, timeout: int = 300):
+    """Execute query with custom timeout."""
+    engine = db.get_engine()
+    with engine.connect() as conn:
+        conn.execute(text(f"SET SESSION max_execution_time = {timeout * 1000}"))
+        return conn.execute(text(sql))
+```
+
+### Memory Issues
+
+#### Problem: "Out of memory errors"
+**Memory Usage Analysis:**
+```python
+import psutil
+import gc
+
+def check_memory_usage():
+    """Check current memory usage."""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+
+    print(f"RSS: {memory_info.rss / 1024 / 1024:.1f} MB")
+    print(f"VMS: {memory_info.vms / 1024 / 1024:.1f} MB")
+    print(f"System memory: {psutil.virtual_memory().percent}%")
+
+    # Force garbage collection
+    collected = gc.collect()
+    print(f"Garbage collected: {collected} objects")
+
+# Monitor memory during query execution
+def execute_with_memory_monitoring(func):
+    """Decorator to monitor memory usage."""
+    def wrapper(*args, **kwargs):
+        check_memory_usage()
+        result = func(*args, **kwargs)
+        check_memory_usage()
+        return result
+    return wrapper
+```
+
+**Memory Optimization:**
+```python
+# Process large datasets in chunks
+def process_large_query_result(query_result, chunk_size=1000):
+    """Process large query results in chunks."""
+    for i in range(0, len(query_result), chunk_size):
+        chunk = query_result[i:i + chunk_size]
+        yield process_chunk(chunk)
+
+        # Clear chunk from memory
+        del chunk
+        gc.collect()
+
+# Optimize DataFrame operations
+def optimize_dataframe_memory(df):
+    """Optimize DataFrame memory usage."""
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Convert to category if many repeated values
+            if df[col].nunique() / len(df) < 0.5:
+                df[col] = df[col].astype('category')
+        elif df[col].dtype == 'float64':
+            # Downcast to float32 if possible
+            df[col] = pd.to_numeric(df[col], downcast='float')
+        elif df[col].dtype == 'int64':
+            # Downcast to smaller int types
+            df[col] = pd.to_numeric(df[col], downcast='integer')
+
+    return df
+```
+
+## 🔧 Development Environment Issues
+
+### Setup Problems
+
+#### Problem: "Import errors" or "Module not found"
+```bash
+# Check Python environment
+python --version
+pip list | grep -E "(superset|flask|sqlalchemy)"
+
+# Reinstall dependencies
+pip install -r requirements/development.txt
+
+# Check PYTHONPATH
+echo $PYTHONPATH
+export PYTHONPATH="/app:$PYTHONPATH"
+```
+
+#### Problem: "Frontend assets not loading"
+```bash
+# Rebuild frontend
+cd superset-frontend
+npm ci
+npm run build
+
+# Check asset paths
+ls -la superset/static/assets/
+
+# Clear browser cache and hard refresh
+```
+
+#### Problem: "Database migrations failing"
+```bash
+# Check migration status
+superset db current
+superset db history --verbose
+
+# Reset to specific revision (DANGEROUS)
+superset db downgrade <revision_id>
+superset db upgrade
+
+# Force migration (if safe)
+superset db stamp head
+superset db upgrade
+```
+
+### Testing Issues
+
+#### Problem: "Tests failing randomly"
+```bash
+# Run tests with more verbose output
+pytest -v --tb=long tests/unit_tests/specific_test.py
+
+# Check for database state pollution
+pytest --setup-only tests/unit_tests/
+
+# Run tests in isolation
+pytest --forked tests/unit_tests/
+```
+
+#### Problem: "Test database issues"
+```python
+# Ensure test database is properly configured
+# In conftest.py or test setup
+def setup_test_database():
+    """Set up clean test database."""
+    from superset import db
+
+    # Create all tables
+    db.create_all()
+
+    # Initialize test data
+    from superset.cli.main import init
+    init()
+
+    yield
+
+    # Cleanup
+    db.session.remove()
+    db.drop_all()
+```
+
+## 📊 Monitoring & Alerting
+
+### Production Monitoring Setup
+```python
+# /superset/utils/monitoring.py
+import logging
+import time
+from functools import wraps
+
+# Custom log formatter for structured logging
+class StructuredFormatter(logging.Formatter):
+    def format(self, record):
+        log_data = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(record.created)),
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
+            'module': record.module,
+            'line': record.lineno
+        }
+
+        # Add extra fields if present
+        if hasattr(record, 'user_id'):
+            log_data['user_id'] = record.user_id
+        if hasattr(record, 'request_id'):
+            log_data['request_id'] = record.request_id
+        if hasattr(record, 'execution_time'):
+            log_data['execution_time'] = record.execution_time
+
+        return json.dumps(log_data)
+
+# Performance monitoring decorator
+def monitor_performance(operation_name: str):
+    """Monitor operation performance."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+
+            try:
+                result = func(*args, **kwargs)
+                execution_time = time.time() - start_time
+
+                # Log successful operation
+                logger.info(
+                    f"Operation completed: {operation_name}",
+                    extra={
+                        'operation': operation_name,
+                        'execution_time': execution_time,
+                        'status': 'success'
+                    }
+                )
+
+                # Send metrics
+                metrics.timing(f'operation.{operation_name}', execution_time)
+                metrics.incr(f'operation.{operation_name}.success')
+
+                return result
+
+            except Exception as e:
+                execution_time = time.time() - start_time
+
+                # Log failed operation
+                logger.error(
+                    f"Operation failed: {operation_name}",
+                    extra={
+                        'operation': operation_name,
+                        'execution_time': execution_time,
+                        'status': 'error',
+                        'error': str(e)
+                    }
+                )
+
+                # Send error metrics
+                metrics.incr(f'operation.{operation_name}.error')
+                raise
+
+        return wrapper
+    return decorator
+
+# Health check endpoint
+@expose('/health/detailed', methods=['GET'])
+def detailed_health_check(self) -> Response:
+    """Comprehensive health check."""
+    checks = {
+        'database': check_database_health(),
+        'cache': check_cache_health(),
+        'celery': check_celery_health(),
+        'memory': check_memory_usage(),
+        'disk': check_disk_usage()
+    }
+
+    overall_status = 'healthy' if all(
+        check['status'] == 'healthy' for check in checks.values()
+    ) else 'unhealthy'
+
+    return self.response(
+        200 if overall_status == 'healthy' else 503,
+        result={
+            'status': overall_status,
+            'timestamp': datetime.utcnow().isoformat(),
+            'checks': checks
+        }
+    )
+```
+
+### Alert Conditions
+```python
+# Define alert thresholds
+ALERT_THRESHOLDS = {
+    'slow_query_threshold': 5.0,  # seconds
+    'error_rate_threshold': 0.05,  # 5% error rate
+    'memory_threshold': 0.85,      # 85% memory usage
+    'disk_threshold': 0.90,        # 90% disk usage
+    'response_time_threshold': 2.0  # 2 seconds
+}
+
+# Alert checking logic
+def check_alerts():
+    """Check for alert conditions."""
+    alerts = []
+
+    # Check slow queries
+    slow_queries = get_slow_queries_count(minutes=5)
+    if slow_queries > 10:
+        alerts.append({
+            'type': 'slow_queries',
+            'severity': 'warning',
+            'message': f'{slow_queries} slow queries in last 5 minutes'
+        })
+
+    # Check error rate
+    error_rate = get_error_rate(minutes=5)
+    if error_rate > ALERT_THRESHOLDS['error_rate_threshold']:
+        alerts.append({
+            'type': 'high_error_rate',
+            'severity': 'critical',
+            'message': f'Error rate: {error_rate:.2%}'
+        })
+
+    return alerts
+```
+
+This troubleshooting guide provides practical solutions for the most common issues developers and operators face with Superset. Each section includes diagnostic commands, code examples, and step-by-step solutions that can be immediately applied to resolve problems.

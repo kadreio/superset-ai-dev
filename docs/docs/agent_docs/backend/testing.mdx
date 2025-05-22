@@ -1,0 +1,251 @@
+# Testing Strategy
+
+Superset uses a comprehensive testing strategy with unit tests, integration tests, and end-to-end tests.
+
+## Test Organization
+
+### Directory Structure
+```
+tests/
+├── unit_tests/              # Fast, isolated tests
+├── integration_tests/       # Full workflow tests with database
+├── common/                  # Shared testing utilities
+├── fixtures/                # Test data and fixtures
+└── conftest.py             # Global pytest configuration
+```
+
+### Test File Conventions
+- **Unit tests**: `*_test.py`, `test_*.py`
+- **Integration tests**: `*_tests.py`, `api_tests.py`
+- **Test modules**: Mirror source structure (`superset/charts/` → `tests/unit_tests/charts/`)
+
+## Testing Commands
+
+### Basic Commands
+```bash
+# Unit tests only (fast)
+pytest tests/unit_tests/
+
+# All integration tests (slow)
+scripts/tests/run.sh
+
+# Integration tests with coverage
+scripts/python_tests.sh
+
+# Specific test file
+pytest tests/unit_tests/charts/test_api.py
+
+# Specific test method
+pytest tests/unit_tests/charts/test_api.py::TestChartApi::test_create_chart
+
+# Run tests matching pattern
+pytest -k "test_create" tests/unit_tests/
+```
+
+### Advanced Options
+```bash
+# Run with verbose output
+pytest -v tests/unit_tests/
+
+# Run with coverage report
+pytest --cov=superset tests/unit_tests/
+
+# Run failed tests only
+pytest --lf tests/unit_tests/
+
+# Stop on first failure
+pytest -x tests/unit_tests/
+
+# Run tests in parallel
+pytest -n auto tests/unit_tests/
+```
+
+## Test Configuration
+
+### pytest.ini
+```ini
+[tool:pytest]
+testpaths = tests
+python_files = test_*.py *_test.py *_tests.py
+python_classes = Test*
+python_functions = test_*
+addopts = --tb=short --strict-markers
+```
+
+### pyproject.toml
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py", "*_tests.py"]
+```
+
+## Testing Patterns
+
+### Fixtures & Setup
+```python
+# conftest.py - Global fixtures
+@pytest.fixture
+def app_context():
+    """Provide Flask app context for tests."""
+    with app.app_context():
+        yield app
+
+@pytest.fixture
+def test_client():
+    """Provide test client for API testing."""
+    return app.test_client()
+
+# Local fixtures in test files
+@pytest.fixture
+def sample_dashboard():
+    """Create a sample dashboard for testing."""
+    dashboard = Dashboard(dashboard_title="Test Dashboard")
+    db.session.add(dashboard)
+    db.session.commit()
+    yield dashboard
+    db.session.delete(dashboard)
+    db.session.commit()
+```
+
+### Database Testing
+```python
+# Unit tests use in-memory SQLite
+class TestChartModel:
+    def test_create_chart(self):
+        chart = Slice(slice_name="Test Chart")
+        db.session.add(chart)
+        db.session.commit()
+        assert chart.id is not None
+
+# Integration tests use PostgreSQL
+class TestChartApi:
+    def test_create_chart_via_api(self):
+        response = self.client.post('/api/v1/chart/', json={
+            'slice_name': 'Test Chart',
+            'datasource_id': 1
+        })
+        assert response.status_code == 201
+```
+
+### Mocking External Dependencies
+```python
+from unittest.mock import patch, MagicMock
+
+class TestDatabaseConnection:
+    @patch('superset.db_engine_specs.postgres.PostgresEngineSpec.get_connection')
+    def test_connection_test(self, mock_connection):
+        mock_connection.return_value = MagicMock()
+        result = test_connection('postgresql://...')
+        assert result.success is True
+```
+
+### API Testing Patterns
+```python
+class TestChartApi:
+    def test_get_chart(self):
+        # Setup
+        chart = self.create_chart()
+
+        # Execute
+        response = self.client.get(f'/api/v1/chart/{chart.id}')
+
+        # Assert
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['result']['slice_name'] == chart.slice_name
+```
+
+### Feature Flag Testing
+```python
+from superset.utils.feature_flags import with_feature_flags
+
+class TestFeatureFlags:
+    @with_feature_flags(DASHBOARD_NATIVE_FILTERS=True)
+    def test_native_filters_enabled(self):
+        # Test behavior when feature flag is enabled
+        pass
+
+    @with_feature_flags(DASHBOARD_NATIVE_FILTERS=False)
+    def test_native_filters_disabled(self):
+        # Test behavior when feature flag is disabled
+        pass
+```
+
+## Writing New Tests
+
+### Unit Test Template
+```python
+import pytest
+from superset.models.dashboard import Dashboard
+from tests.integration_tests.base_tests import SupersetTestCase
+
+class TestDashboardModel(SupersetTestCase):
+    def test_create_dashboard(self):
+        """Test dashboard creation."""
+        dashboard = Dashboard(
+            dashboard_title="Test Dashboard",
+            slug="test-dashboard"
+        )
+        db.session.add(dashboard)
+        db.session.commit()
+
+        assert dashboard.id is not None
+        assert dashboard.dashboard_title == "Test Dashboard"
+
+    def test_dashboard_validation(self):
+        """Test dashboard validation rules."""
+        with pytest.raises(ValidationError):
+            Dashboard(dashboard_title="")  # Empty title should fail
+```
+
+### Integration Test Template
+```python
+from tests.integration_tests.base_tests import SupersetTestCase
+
+class TestDashboardApi(SupersetTestCase):
+    def setUp(self):
+        """Set up test data."""
+        super().setUp()
+        self.login('admin')
+
+    def test_create_dashboard(self):
+        """Test dashboard creation via API."""
+        response = self.client.post('/api/v1/dashboard/', json={
+            'dashboard_title': 'Test Dashboard',
+            'slug': 'test-dashboard'
+        })
+
+        self.assertEqual(response.status_code, 201)
+        data = response.get_json()
+        self.assertIsNotNone(data['id'])
+
+    def tearDown(self):
+        """Clean up test data."""
+        super().tearDown()
+```
+
+## Best Practices
+
+### Test Organization
+1. **Group related tests** in classes inheriting from `SupersetTestCase`
+2. **Use descriptive test names** that explain what's being tested
+3. **Follow AAA pattern**: Arrange, Act, Assert
+4. **Keep tests independent** - each test should be able to run in isolation
+
+### Test Data Management
+1. **Use fixtures** for common test data setup
+2. **Clean up after tests** to avoid state pollution
+3. **Use factories** for creating test objects with variations
+4. **Mock external dependencies** to keep tests fast and reliable
+
+### Performance
+1. **Prefer unit tests** over integration tests for business logic
+2. **Use pytest markers** to categorize tests (slow, fast, database)
+3. **Run unit tests frequently** during development
+4. **Run integration tests** before commits
+
+### Coverage
+1. **Aim for high coverage** but don't sacrifice quality for numbers
+2. **Focus on critical paths** and edge cases
+3. **Use coverage reports** to identify untested code
+4. **Write tests for bug fixes** to prevent regressions

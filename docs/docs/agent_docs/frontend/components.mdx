@@ -1,0 +1,560 @@
+# Frontend Components Guide
+
+Comprehensive guide to Superset's React component system, design patterns, and best practices for building consistent UI elements.
+
+## Component Architecture
+
+Superset uses a **design system approach** based on Atomic Design principles with a focus on reusability, consistency, and accessibility.
+
+### Component Hierarchy
+
+```
+Design System Layers:
+├── Atoms - Basic UI elements (Button, Input, Icon)
+├── Molecules - Composite components (SearchInput, FormField)
+├── Organisms - Complex features (DataTable, ChartContainer)
+├── Templates - Page layouts and structure
+└── Pages - Complete views with routing
+```
+
+### Component Organization
+
+```
+src/components/
+├── Alert/                 # Status messages and notifications
+├── AsyncAceEditor/        # Code editor with syntax highlighting
+├── Avatar/                # User profile images
+├── Badge/                 # Status indicators and labels
+├── Button/                # Primary action components
+├── ButtonGroup/           # Related button collections
+├── Card/                  # Content containers
+├── Chart/                 # Chart rendering framework
+├── Checkbox/              # Form selection inputs
+├── CopyToClipboard/       # Copy functionality component
+├── CronPicker/            # Schedule configuration
+├── DatabaseSelector/      # Database selection component
+└── [many more...]
+```
+
+## Component Standards
+
+### Component Structure
+
+**Standard Directory Layout:**
+```
+ComponentName/
+├── index.tsx                    # Main component export
+├── ComponentName.stories.tsx    # Storybook documentation
+├── ComponentName.test.tsx       # Jest unit tests
+├── types.ts                     # TypeScript interfaces
+└── styles.tsx                   # Emotion styled components
+```
+
+**Example Component Implementation:**
+```typescript
+// Button/index.tsx
+import React from 'react';
+import { ButtonProps } from './types';
+import { StyledButton } from './styles';
+
+const Button: React.FC<ButtonProps> = ({
+  children,
+  variant = 'primary',
+  size = 'medium',
+  onClick,
+  disabled = false,
+  ...props
+}) => (
+  <StyledButton
+    variant={variant}
+    size={size}
+    onClick={onClick}
+    disabled={disabled}
+    {...props}
+  >
+    {children}
+  </StyledButton>
+);
+
+export default Button;
+```
+
+### TypeScript Interfaces
+
+**Component Props Definition:**
+```typescript
+// Button/types.ts
+export interface ButtonProps {
+  children: React.ReactNode;
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+  size?: 'small' | 'medium' | 'large';
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+  loading?: boolean;
+  icon?: React.ReactNode;
+  htmlType?: 'button' | 'submit' | 'reset';
+  className?: string;
+  'data-test'?: string;
+}
+```
+
+### Styled Components
+
+**Emotion-based Styling:**
+```typescript
+// Button/styles.tsx
+import styled from '@emotion/styled';
+import { ButtonProps } from './types';
+
+export const StyledButton = styled.button<ButtonProps>`
+  /* Base styles */
+  border: none;
+  border-radius: ${({ theme }) => theme.borderRadius}px;
+  cursor: pointer;
+  font-family: ${({ theme }) => theme.typography.families.sansSerif};
+  transition: all 0.2s ease;
+
+  /* Variant styles */
+  ${({ variant, theme }) => {
+    switch (variant) {
+      case 'primary':
+        return `
+          background-color: ${theme.colors.primary.base};
+          color: ${theme.colors.grayscale.light5};
+          &:hover { background-color: ${theme.colors.primary.dark1}; }
+        `;
+      case 'secondary':
+        return `
+          background-color: ${theme.colors.secondary.base};
+          color: ${theme.colors.grayscale.dark2};
+        `;
+      default:
+        return '';
+    }
+  }}
+
+  /* Size styles */
+  ${({ size }) => {
+    switch (size) {
+      case 'small':
+        return 'padding: 4px 8px; font-size: 12px;';
+      case 'large':
+        return 'padding: 12px 24px; font-size: 16px;';
+      default:
+        return 'padding: 8px 16px; font-size: 14px;';
+    }
+  }}
+
+  /* Disabled state */
+  ${({ disabled, theme }) => disabled && `
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+  `}
+`;
+```
+
+## Design System Components
+
+### Form Components
+
+**Input with Validation:**
+```typescript
+// FormInput/index.tsx
+import React from 'react';
+import { Input } from 'antd';
+import { FormItemProps } from './types';
+import { StyledFormItem, ErrorMessage } from './styles';
+
+const FormInput: React.FC<FormItemProps> = ({
+  label,
+  required = false,
+  error,
+  value,
+  onChange,
+  placeholder,
+  ...props
+}) => (
+  <StyledFormItem hasError={!!error}>
+    {label && (
+      <label>
+        {label}
+        {required && <span className="required">*</span>}
+      </label>
+    )}
+    <Input
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      status={error ? 'error' : undefined}
+      {...props}
+    />
+    {error && <ErrorMessage>{error}</ErrorMessage>}
+  </StyledFormItem>
+);
+```
+
+**Select Component:**
+```typescript
+// Select/index.tsx
+import React from 'react';
+import { Select as AntSelect } from 'antd';
+import { SelectProps } from './types';
+
+const Select: React.FC<SelectProps> = ({
+  options,
+  value,
+  onChange,
+  placeholder = 'Select an option',
+  allowClear = true,
+  showSearch = true,
+  ...props
+}) => (
+  <AntSelect
+    value={value}
+    onChange={onChange}
+    placeholder={placeholder}
+    allowClear={allowClear}
+    showSearch={showSearch}
+    filterOption={(input, option) =>
+      option?.label?.toLowerCase().includes(input.toLowerCase())
+    }
+    {...props}
+  >
+    {options.map(option => (
+      <AntSelect.Option key={option.value} value={option.value}>
+        {option.label}
+      </AntSelect.Option>
+    ))}
+  </AntSelect>
+);
+```
+
+### Layout Components
+
+**Card Component:**
+```typescript
+// Card/index.tsx
+import React from 'react';
+import { CardProps } from './types';
+import { StyledCard, CardHeader, CardBody } from './styles';
+
+const Card: React.FC<CardProps> = ({
+  title,
+  children,
+  actions,
+  loading = false,
+  size = 'default',
+  ...props
+}) => (
+  <StyledCard size={size} {...props}>
+    {title && (
+      <CardHeader>
+        <h3>{title}</h3>
+        {actions && <div className="actions">{actions}</div>}
+      </CardHeader>
+    )}
+    <CardBody loading={loading}>
+      {loading ? <div>Loading...</div> : children}
+    </CardBody>
+  </StyledCard>
+);
+```
+
+**Modal Component:**
+```typescript
+// Modal/index.tsx
+import React from 'react';
+import { Modal as AntModal } from 'antd';
+import { ModalProps } from './types';
+
+const Modal: React.FC<ModalProps> = ({
+  title,
+  children,
+  visible,
+  onCancel,
+  onOk,
+  width = 600,
+  destroyOnClose = true,
+  ...props
+}) => (
+  <AntModal
+    title={title}
+    open={visible}
+    onCancel={onCancel}
+    onOk={onOk}
+    width={width}
+    destroyOnClose={destroyOnClose}
+    {...props}
+  >
+    {children}
+  </AntModal>
+);
+```
+
+## Advanced Component Patterns
+
+### Compound Components
+
+**Tabs with Compound Pattern:**
+```typescript
+// Tabs/index.tsx
+interface TabsProps {
+  children: React.ReactNode;
+  activeKey?: string;
+  onChange?: (key: string) => void;
+}
+
+const Tabs: React.FC<TabsProps> & {
+  TabPane: React.FC<TabPaneProps>;
+} = ({ children, activeKey, onChange }) => {
+  const [activeTab, setActiveTab] = useState(activeKey);
+
+  const handleTabChange = (key: string) => {
+    setActiveTab(key);
+    onChange?.(key);
+  };
+
+  return (
+    <TabsContext.Provider value={{ activeTab, onChange: handleTabChange }}>
+      <div className="tabs-container">
+        {children}
+      </div>
+    </TabsContext.Provider>
+  );
+};
+
+Tabs.TabPane = TabPane;
+export default Tabs;
+```
+
+### Render Props Pattern
+
+**Data Fetcher Component:**
+```typescript
+// DataFetcher/index.tsx
+interface DataFetcherProps<T> {
+  url: string;
+  children: (state: {
+    data: T | null;
+    loading: boolean;
+    error: Error | null;
+    refetch: () => void;
+  }) => React.ReactNode;
+}
+
+const DataFetcher = <T,>({ url, children }: DataFetcherProps<T>) => {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await SupersetClient.get({ endpoint: url });
+      setData(response.json);
+    } catch (err) {
+      setError(err as Error);
+    } finally {
+      setLoading(false);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  return <>{children({ data, loading, error, refetch: fetchData })}</>;
+};
+```
+
+### Higher-Order Components
+
+**WithPermissions HOC:**
+```typescript
+// withPermissions/index.tsx
+import React from 'react';
+import { useSelector } from 'react-redux';
+
+interface WithPermissionsProps {
+  fallback?: React.ReactNode;
+  permissions: string[];
+}
+
+const withPermissions = <P extends object>(
+  Component: React.ComponentType<P>
+) => {
+  return ({ permissions, fallback, ...props }: P & WithPermissionsProps) => {
+    const userPermissions = useSelector(state => state.user.permissions);
+
+    const hasPermission = permissions.every(permission =>
+      userPermissions.includes(permission)
+    );
+
+    if (!hasPermission) {
+      return fallback || <div>Access denied</div>;
+    }
+
+    return <Component {...(props as P)} />;
+  };
+};
+```
+
+## Storybook Integration
+
+### Story Configuration
+
+**Component Stories:**
+```typescript
+// Button/Button.stories.tsx
+import type { Meta, StoryObj } from '@storybook/react';
+import Button from './index';
+
+const meta: Meta<typeof Button> = {
+  title: 'Components/Button',
+  component: Button,
+  parameters: {
+    docs: { description: { component: 'Primary button component' } }
+  },
+  argTypes: {
+    variant: {
+      control: { type: 'select' },
+      options: ['primary', 'secondary', 'danger', 'ghost']
+    },
+    size: {
+      control: { type: 'select' },
+      options: ['small', 'medium', 'large']
+    }
+  }
+};
+
+export default meta;
+type Story = StoryObj<typeof Button>;
+
+export const Primary: Story = {
+  args: {
+    children: 'Primary Button',
+    variant: 'primary'
+  }
+};
+
+export const Secondary: Story = {
+  args: {
+    children: 'Secondary Button',
+    variant: 'secondary'
+  }
+};
+
+export const AllVariants: Story = {
+  render: () => (
+    <div style={{ display: 'flex', gap: '1rem' }}>
+      <Button variant="primary">Primary</Button>
+      <Button variant="secondary">Secondary</Button>
+      <Button variant="danger">Danger</Button>
+      <Button variant="ghost">Ghost</Button>
+    </div>
+  )
+};
+```
+
+## Best Practices
+
+### Component Development
+
+**1. Consistent API Design:**
+- Use descriptive prop names
+- Provide sensible defaults
+- Support common use cases
+- Follow Ant Design patterns
+
+**2. Accessibility:**
+```typescript
+// Accessible button with proper ARIA attributes
+const AccessibleButton: React.FC<ButtonProps> = ({
+  children,
+  ariaLabel,
+  ariaDescribedBy,
+  ...props
+}) => (
+  <button
+    aria-label={ariaLabel}
+    aria-describedby={ariaDescribedBy}
+    {...props}
+  >
+    {children}
+  </button>
+);
+```
+
+**3. Performance Optimization:**
+```typescript
+// Memoized component for performance
+const ExpensiveComponent = React.memo<ExpensiveProps>(({
+  data,
+  onItemClick
+}) => {
+  const handleClick = useCallback((item) => {
+    onItemClick?.(item);
+  }, [onItemClick]);
+
+  return (
+    <div>
+      {data.map(item => (
+        <Item key={item.id} onClick={() => handleClick(item)} />
+      ))}
+    </div>
+  );
+});
+```
+
+**4. Error Boundaries:**
+```typescript
+// Component with error boundary
+const SafeComponent: React.FC<ComponentProps> = ({ children }) => {
+  return (
+    <ErrorBoundary fallback={<ErrorFallback />}>
+      {children}
+    </ErrorBoundary>
+  );
+};
+```
+
+### Testing Components
+
+**Component Test Example:**
+```typescript
+// Button.test.tsx
+import { render, screen } from 'spec/helpers/testing-library';
+import userEvent from '@testing-library/user-event';
+import Button from './index';
+
+describe('Button', () => {
+  it('renders with correct text', () => {
+    render(<Button>Click me</Button>);
+    expect(screen.getByRole('button')).toHaveTextContent('Click me');
+  });
+
+  it('calls onClick when clicked', async () => {
+    const user = userEvent.setup();
+    const handleClick = jest.fn();
+
+    render(<Button onClick={handleClick}>Click me</Button>);
+    await user.click(screen.getByRole('button'));
+
+    expect(handleClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies correct variant styling', () => {
+    render(<Button variant="primary">Primary</Button>);
+    const button = screen.getByRole('button');
+    expect(button).toHaveClass('ant-btn-primary');
+  });
+
+  it('is disabled when disabled prop is true', () => {
+    render(<Button disabled>Disabled</Button>);
+    expect(screen.getByRole('button')).toBeDisabled();
+  });
+});
+```
+
+This component system provides a solid foundation for building consistent, accessible, and maintainable UI components across the Superset application.

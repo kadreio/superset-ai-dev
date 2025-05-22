@@ -1,0 +1,606 @@
+# Frontend Plugin System
+
+Comprehensive guide to Superset's extensible plugin architecture for creating custom visualizations and extending chart capabilities.
+
+## Plugin Architecture Overview
+
+Superset's plugin system is built on a **registry-based architecture** that allows dynamic loading and registration of chart types, controls, and visualizations.
+
+### Core Concepts
+
+**Plugin Framework** (`@superset-ui/core`):
+- **ChartPlugin**: Base class for all chart plugins
+- **Registry**: Central plugin registration system
+- **Metadata**: Declarative plugin capabilities
+- **Query Building**: Standardized data transformation
+
+**Plugin Types:**
+```
+Chart Plugins:
+├── Legacy Plugins - D3/jQuery-based charts
+├── Modern Plugins - React/TypeScript charts
+└── Preset Collections - Grouped plugin sets
+
+Control Plugins:
+├── Form Controls - Configuration UI components
+├── Validators - Input validation logic
+└── Transformers - Data transformation utilities
+```
+
+## Plugin Directory Structure
+
+### Current Plugin Organization
+
+```
+superset-frontend/
+├── plugins/
+│   ├── legacy-plugin-chart-*        # Legacy D3/jQuery charts
+│   │   ├── calendar/
+│   │   ├── chord/
+│   │   ├── country-map/
+│   │   ├── horizon/
+│   │   ├── map-box/
+│   │   ├── paired-t-test/
+│   │   ├── parallel-coordinates/
+│   │   ├── partition/
+│   │   ├── rose/
+│   │   └── world-map/
+│   ├── plugin-chart-*              # Modern React charts
+│   │   ├── cartodiagram/
+│   │   ├── echarts/
+│   │   ├── handlebars/
+│   │   ├── pivot-table/
+│   │   ├── table/
+│   │   └── word-cloud/
+│   └── legacy-preset-chart-*        # Chart collections
+│       ├── deckgl/
+│       └── nvd3/
+└── packages/
+    ├── superset-ui-core/            # Plugin framework
+    ├── superset-ui-chart-controls/  # Control panel framework
+    └── superset-ui-switchboard/     # Communication framework
+```
+
+### Plugin Structure Template
+
+**Standard Plugin Layout:**
+```
+plugin-chart-my-chart/
+├── src/
+│   ├── index.ts                     # Plugin registration
+│   ├── MyChart.tsx                  # Chart component
+│   ├── buildQuery.ts                # Query builder
+│   ├── controlPanel.tsx             # Configuration UI
+│   ├── transformProps.ts            # Data transformation
+│   └── types.ts                     # TypeScript definitions
+├── test/
+│   ├── MyChart.test.tsx            # Component tests
+│   ├── buildQuery.test.ts          # Query builder tests
+│   └── transformProps.test.ts      # Transform tests
+├── types/
+│   └── external.d.ts               # External type definitions
+├── package.json                     # Plugin metadata
+├── tsconfig.json                    # TypeScript config
+└── README.md                        # Plugin documentation
+```
+
+## Creating Chart Plugins
+
+### Basic Plugin Implementation
+
+**1. Plugin Registration (`src/index.ts`):**
+```typescript
+import { ChartPlugin } from '@superset-ui/core';
+import metadata from './metadata';
+import buildQuery from './buildQuery';
+import controlPanel from './controlPanel';
+import transformProps from './transformProps';
+import Chart from './MyChart';
+
+export default class MyChartPlugin extends ChartPlugin {
+  constructor() {
+    super({
+      metadata,
+      Chart,
+      buildQuery,
+      controlPanel,
+      transformProps,
+    });
+  }
+}
+```
+
+**2. Plugin Metadata (`src/metadata.ts`):**
+```typescript
+import { ChartMetadata, ChartPlugin } from '@superset-ui/core';
+import thumbnail from './images/thumbnail.png';
+
+const metadata = new ChartMetadata({
+  name: 'My Custom Chart',
+  description: 'A custom visualization chart',
+  credits: ['Your Name'],
+  category: 'Custom',
+  tags: ['Experimental', 'Custom'],
+  thumbnail,
+  useLegacyApi: false,
+  canBeAnnotationType: false,
+  supportedAnnotationTypes: [],
+});
+
+export default metadata;
+```
+
+**3. Chart Component (`src/MyChart.tsx`):**
+```typescript
+import React, { useEffect, useRef } from 'react';
+import { styled } from '@superset-ui/core';
+import { MyChartProps } from './types';
+
+const StyledContainer = styled.div`
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
+const MyChart: React.FC<MyChartProps> = ({
+  data,
+  height,
+  width,
+  queriesData,
+  formData,
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (containerRef.current && data?.length) {
+      // Implement your chart rendering logic here
+      renderChart(containerRef.current, data, { height, width });
+    }
+  }, [data, height, width]);
+
+  return (
+    <StyledContainer
+      ref={containerRef}
+      style={{ height, width }}
+    >
+      {!data?.length && <div>No data available</div>}
+    </StyledContainer>
+  );
+};
+
+export default MyChart;
+```
+
+**4. Query Builder (`src/buildQuery.ts`):**
+```typescript
+import { buildQueryContext, QueryFormData } from '@superset-ui/core';
+import { MyFormData } from './types';
+
+export default function buildQuery(formData: MyFormData) {
+  const {
+    granularity_sqla,
+    time_range,
+    groupby = [],
+    metrics = [],
+    filters = [],
+  } = formData;
+
+  return buildQueryContext(formData, {
+    queryFields: {
+      granularity_sqla,
+      time_range,
+      groupby,
+      metrics,
+      filters,
+    },
+  });
+}
+```
+
+**5. Control Panel (`src/controlPanel.tsx`):**
+```typescript
+import React from 'react';
+import {
+  ControlPanelConfig,
+  sections,
+  sharedControls,
+} from '@superset-ui/chart-controls';
+
+const controlPanel: ControlPanelConfig = {
+  controlPanelSections: [
+    sections.legacyTimeseriesTime,
+    {
+      label: 'Query',
+      expanded: true,
+      controlSetRows: [
+        ['metrics'],
+        ['groupby'],
+        ['adhoc_filters'],
+      ],
+    },
+    {
+      label: 'Chart Options',
+      expanded: true,
+      controlSetRows: [
+        [
+          {
+            name: 'color_scheme',
+            config: {
+              ...sharedControls.color_scheme,
+              default: 'supersetColors',
+            },
+          },
+        ],
+        [
+          {
+            name: 'show_legend',
+            config: {
+              type: 'CheckboxControl',
+              label: 'Show Legend',
+              default: true,
+              description: 'Whether to show the chart legend',
+            },
+          },
+        ],
+      ],
+    },
+  ],
+};
+
+export default controlPanel;
+```
+
+**6. Data Transformation (`src/transformProps.ts`):**
+```typescript
+import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
+import { MyChartProps, MyFormData } from './types';
+
+export default function transformProps(
+  chartProps: ChartProps<MyFormData>
+): MyChartProps {
+  const { width, height, formData, queriesData } = chartProps;
+  const { colorScheme, showLegend } = formData;
+  const data = queriesData[0]?.data as TimeseriesDataRecord[];
+
+  return {
+    width,
+    height,
+    data: data || [],
+    colorScheme,
+    showLegend,
+    queriesData,
+    formData,
+  };
+}
+```
+
+### Advanced Plugin Features
+
+**Custom Controls:**
+```typescript
+// Custom control definition
+const customControl = {
+  name: 'custom_parameter',
+  config: {
+    type: 'SelectControl',
+    label: 'Custom Parameter',
+    description: 'Select a custom option',
+    default: 'option1',
+    choices: [
+      ['option1', 'Option 1'],
+      ['option2', 'Option 2'],
+      ['option3', 'Option 3'],
+    ],
+    validators: [],
+  },
+};
+```
+
+**Dynamic Control Visibility:**
+```typescript
+// Control visibility based on other controls
+{
+  name: 'conditional_control',
+  config: {
+    type: 'CheckboxControl',
+    label: 'Conditional Setting',
+    default: false,
+    visibility: ({ controls }) =>
+      controls?.show_advanced?.value === true,
+  },
+}
+```
+
+**Custom Validators:**
+```typescript
+// Custom validation logic
+const customValidator = (value: any, formData: any) => {
+  if (value < 0) {
+    return 'Value must be positive';
+  }
+  if (formData.max_value && value > formData.max_value) {
+    return 'Value exceeds maximum';
+  }
+  return null;
+};
+```
+
+## Plugin Registration
+
+### Main Preset Registration
+
+**Plugin Setup (`src/setup/setupPlugins.ts`):**
+```typescript
+import { Preset } from '@superset-ui/core';
+import MyChartPlugin from '../plugins/plugin-chart-my-chart';
+
+// Register plugin in main preset
+class MainPreset extends Preset {
+  constructor() {
+    super({
+      name: 'Superset Chart Plugins',
+      plugins: [
+        new MyChartPlugin(),
+        // ... other plugins
+      ],
+    });
+  }
+}
+
+new MainPreset().register();
+```
+
+**Conditional Loading:**
+```typescript
+// Feature flag-based loading
+import { isFeatureEnabled, FeatureFlag } from 'src/featureFlags';
+
+if (isFeatureEnabled(FeatureFlag.ENABLE_CUSTOM_CHARTS)) {
+  new MyChartPlugin().register();
+}
+```
+
+### Plugin Package Configuration
+
+**Package.json Setup:**
+```json
+{
+  "name": "@superset-ui/plugin-chart-my-chart",
+  "version": "1.0.0",
+  "description": "Custom chart plugin for Superset",
+  "main": "lib/index.js",
+  "module": "esm/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "esm"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@superset-ui/core": "file:../../packages/superset-ui-core",
+    "@superset-ui/chart-controls": "file:../../packages/superset-ui-chart-controls"
+  }
+}
+```
+
+## Testing Plugins
+
+### Component Testing
+
+**Chart Component Tests:**
+```typescript
+// MyChart.test.tsx
+import React from 'react';
+import { render } from 'spec/helpers/testing-library';
+import MyChart from '../src/MyChart';
+import { mockData } from './fixtures';
+
+describe('MyChart', () => {
+  const defaultProps = {
+    data: mockData,
+    height: 400,
+    width: 600,
+    queriesData: [{ data: mockData }],
+    formData: {
+      colorScheme: 'supersetColors',
+      showLegend: true,
+    },
+  };
+
+  it('renders chart with data', () => {
+    const { container } = render(<MyChart {...defaultProps} />);
+    expect(container.querySelector('.chart-container')).toBeInTheDocument();
+  });
+
+  it('shows no data message when data is empty', () => {
+    const { getByText } = render(
+      <MyChart {...defaultProps} data={[]} />
+    );
+    expect(getByText('No data available')).toBeInTheDocument();
+  });
+
+  it('applies custom color scheme', () => {
+    const customProps = {
+      ...defaultProps,
+      formData: { ...defaultProps.formData, colorScheme: 'custom' }
+    };
+    render(<MyChart {...customProps} />);
+    // Verify color scheme application
+  });
+});
+```
+
+**Query Builder Tests:**
+```typescript
+// buildQuery.test.ts
+import buildQuery from '../src/buildQuery';
+
+describe('buildQuery', () => {
+  const baseFormData = {
+    datasource: '1__table',
+    granularity_sqla: 'timestamp',
+    time_range: 'Last week',
+    metrics: ['count'],
+    groupby: ['category'],
+  };
+
+  it('builds query with basic parameters', () => {
+    const query = buildQuery(baseFormData);
+
+    expect(query.queries).toHaveLength(1);
+    expect(query.queries[0]).toMatchObject({
+      granularity: 'timestamp',
+      metrics: ['count'],
+      groupby: ['category'],
+    });
+  });
+
+  it('handles filters correctly', () => {
+    const formDataWithFilters = {
+      ...baseFormData,
+      adhoc_filters: [
+        {
+          clause: 'WHERE',
+          subject: 'status',
+          operator: '==',
+          comparator: 'active',
+        }
+      ],
+    };
+
+    const query = buildQuery(formDataWithFilters);
+    expect(query.queries[0].filters).toHaveLength(1);
+  });
+});
+```
+
+### Integration Testing
+
+**Plugin Registration Test:**
+```typescript
+// Plugin registration test
+import { getChartMetadataRegistry } from '@superset-ui/core';
+import MyChartPlugin from '../src';
+
+describe('MyChartPlugin registration', () => {
+  beforeAll(() => {
+    new MyChartPlugin().register();
+  });
+
+  it('registers plugin in chart metadata registry', () => {
+    const registry = getChartMetadataRegistry();
+    expect(registry.has('my-chart')).toBe(true);
+  });
+
+  it('has correct plugin metadata', () => {
+    const registry = getChartMetadataRegistry();
+    const metadata = registry.get('my-chart');
+
+    expect(metadata?.name).toBe('My Custom Chart');
+    expect(metadata?.description).toBeDefined();
+  });
+});
+```
+
+## Plugin Best Practices
+
+### Development Guidelines
+
+**1. TypeScript Integration:**
+```typescript
+// Strong typing for all plugin interfaces
+interface MyChartProps {
+  data: DataRecord[];
+  height: number;
+  width: number;
+  colorScheme: string;
+  showLegend: boolean;
+  formData: MyFormData;
+  queriesData: QueryData[];
+}
+
+interface MyFormData extends QueryFormData {
+  colorScheme: string;
+  showLegend: boolean;
+  customParameter?: string;
+}
+```
+
+**2. Error Handling:**
+```typescript
+// Robust error handling in chart components
+const MyChart: React.FC<MyChartProps> = ({ data, height, width }) => {
+  try {
+    if (!data?.length) {
+      return <div>No data available</div>;
+    }
+
+    if (height <= 0 || width <= 0) {
+      return <div>Invalid dimensions</div>;
+    }
+
+    return renderChart(data, { height, width });
+  } catch (error) {
+    console.error('Chart rendering error:', error);
+    return <div>Chart rendering failed</div>;
+  }
+};
+```
+
+**3. Performance Optimization:**
+```typescript
+// Memoized chart for performance
+const MyChart = React.memo<MyChartProps>(({ data, height, width }) => {
+  const chartConfig = useMemo(() =>
+    computeChartConfig(data, height, width),
+    [data, height, width]
+  );
+
+  return <ChartRenderer config={chartConfig} />;
+});
+```
+
+**4. Accessibility:**
+```typescript
+// Accessible chart implementation
+const MyChart: React.FC<MyChartProps> = ({ data, ...props }) => (
+  <div
+    role="img"
+    aria-label={`Chart displaying ${data.length} data points`}
+    tabIndex={0}
+  >
+    <ChartVisualization data={data} {...props} />
+    <div className="sr-only">
+      {/* Screen reader description */}
+      Data summary: {generateDataSummary(data)}
+    </div>
+  </div>
+);
+```
+
+### Distribution and Maintenance
+
+**Plugin Versioning:**
+- Follow semantic versioning
+- Maintain backward compatibility
+- Document breaking changes
+- Provide migration guides
+
+**Documentation:**
+- Include comprehensive README
+- Provide usage examples
+- Document control panel options
+- Add troubleshooting guide
+
+**Testing Strategy:**
+- Unit tests for all functions
+- Integration tests for plugin registration
+- Visual regression tests for chart output
+- Performance tests for large datasets
+
+This plugin system provides unlimited extensibility for custom visualizations while maintaining consistency, quality, and performance across the Superset ecosystem.

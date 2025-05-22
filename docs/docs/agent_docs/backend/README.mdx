@@ -1,0 +1,59 @@
+# Backend Development Guide
+
+Apache Superset's backend is built with Python/Flask and follows a layered architecture with clear separation of concerns. This guide provides comprehensive information for working with the backend codebase.
+
+## 📖 Documentation Index
+**→ [Complete Documentation Index](./index.mdx)** - Navigate all topics with learning paths and quick references
+
+## 🍳 Quick Start
+**→ [Backend Cookbook](./cookbook.mdx)** - Copy-paste ready examples for common tasks
+
+## 📚 Core Documentation
+
+### **Architecture & Patterns**
+- **[Architecture Overview](./architecture.mdx)** - Layered architecture, data flow, patterns
+- **[Command Pattern](./commands.mdx)** - Business logic encapsulation
+- **[Database Layer](./database.mdx)** - Models, DAOs, relationships, migrations
+- **[API Development](./api.mdx)** - REST API patterns and best practices
+
+### **Development & Operations**
+- **[Development Workflow](./development.mdx)** - Setup, workflow, debugging
+- **[Testing Strategy](./testing.mdx)** - Unit, integration, and E2E testing
+- **[Code Quality Tools](./utilities.mdx)** - Linting, formatting, type checking
+- **[Security & Permissions](./security.mdx)** - RBAC, authentication, authorization
+
+### **Advanced Topics**
+- **[Async & Background Tasks](./async-tasks.mdx)** - Celery, queues, monitoring
+- **[Query Execution Pipeline](./query-pipeline.mdx)** - How queries flow through the system
+- **[Troubleshooting Guide](./troubleshooting.mdx)** - Common issues and solutions
+
+## Core Concepts
+
+### Layered Architecture
+```
+┌─────────────────┐
+│   API Views     │  ← Flask routes, request/response handling
+├─────────────────┤
+│   Commands      │  ← Business logic, validation, orchestration
+├─────────────────┤
+│   DAOs          │  ← Data Access Objects, database operations
+├─────────────────┤
+│   Models        │  ← SQLAlchemy models, relationships
+└─────────────────┘
+```
+
+### Development Philosophy
+- **Command Pattern**: Complex operations are encapsulated in Command classes
+- **DAO Pattern**: Database operations are abstracted through Data Access Objects
+- **Type Safety**: Comprehensive type hints throughout the codebase
+- **Test-Driven**: Unit and integration tests guide development
+- **Security First**: Fine-grained RBAC with Flask-AppBuilder
+
+## Getting Started
+
+1. **Environment Setup**: Use VS Code Dev Container for automatic setup
+2. **Code Quality**: Pre-commit hooks ensure consistent code style
+3. **Testing**: Start with unit tests, then integration tests
+4. **Architecture**: Follow existing patterns for new features
+
+See individual guides for detailed information on each topic.

@@ -1,0 +1,596 @@
+# Security & Permissions
+
+Superset implements a comprehensive security model with role-based access control (RBAC), fine-grained permissions, and multi-layered security features.
+
+## Security Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│            Authentication                   │
+│  OAuth, LDAP, Database, Custom Auth        │
+├─────────────────────────────────────────────┤
+│             Authorization                   │
+│      Role-Based Access Control             │
+├─────────────────────────────────────────────┤
+│           Resource Permissions              │
+│   Dashboard, Chart, Dataset, Database      │
+├─────────────────────────────────────────────┤
+│           Row-Level Security                │
+│        Data-level access control           │
+└─────────────────────────────────────────────┘
+```
+
+## Flask-AppBuilder Security
+
+### Security Manager
+Central security management through Flask-AppBuilder:
+
+```python
+from flask_appbuilder.security.manager import BaseSecurityManager
+from superset.security.manager import SupersetSecurityManager
+
+class SupersetSecurityManager(BaseSecurityManager):
+    """Custom security manager for Superset."""
+
+    def __init__(self, appbuilder):
+        super().__init__(appbuilder)
+        self.permission_view_menu = {}
+
+    def can_access_chart(self, chart: Slice) -> bool:
+        """Check if user can access specific chart."""
+        return self.has_access('can_read', 'Chart') and \
+               self._can_access_schema(chart.datasource)
+
+    def can_edit_chart(self, chart: Slice) -> bool:
+        """Check if user can edit specific chart."""
+        return self.has_access('can_write', 'Chart') and \
+               self._is_owner_or_admin(chart)
+
+    def can_access_datasource(self, datasource: BaseDatasource) -> bool:
+        """Check datasource access permissions."""
+        if self.is_admin():
+            return True
+
+        # Check schema permissions
+        schema_perm = self.get_schema_perm(datasource.database, datasource.schema)
+        return self.has_access('can_read', schema_perm)
+
+    def _is_owner_or_admin(self, obj: Any) -> bool:
+        """Check if user is owner or admin."""
+        if self.is_admin():
+            return True
+
+        if hasattr(obj, 'owners'):
+            return self.current_user in obj.owners
+
+        return False
+```
+
+### Permission Decorators
+```python
+from flask_appbuilder.security.decorators import has_access, has_access_api, protect
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    @expose('/data', methods=['POST'])
+    @protect()  # Basic authentication check
+    @statsd_metrics
+    def get_data(self, pk: int) -> Response:
+        """Get chart data - requires authentication."""
+        pass
+
+    @expose('/sensitive', methods=['GET'])
+    @has_access_api
+    @protect()
+    def sensitive_endpoint(self) -> Response:
+        """Sensitive endpoint - requires specific permissions."""
+        pass
+
+    @expose('/admin-only', methods=['POST'])
+    @protect()
+    def admin_endpoint(self) -> Response:
+        """Admin-only endpoint with custom check."""
+        if not security_manager.is_admin():
+            return self.response_403(message="Admin access required")
+        pass
+```
+
+## Role-Based Access Control
+
+### Standard Roles
+Superset provides predefined roles with different permission levels:
+
+```python
+# Standard roles defined in security.py
+ADMIN_ROLE = 'Admin'          # Full access
+ALPHA_ROLE = 'Alpha'          # Can create/edit content
+GAMMA_ROLE = 'Gamma'          # Read-only access
+SQL_LAB_ROLE = 'sql_lab'      # SQL Lab access
+PUBLIC_ROLE = 'Public'        # Public dashboard access
+
+# Role hierarchy (higher roles inherit lower permissions)
+ROLE_HIERARCHY = {
+    ADMIN_ROLE: [ALPHA_ROLE, GAMMA_ROLE, SQL_LAB_ROLE, PUBLIC_ROLE],
+    ALPHA_ROLE: [GAMMA_ROLE, PUBLIC_ROLE],
+    GAMMA_ROLE: [PUBLIC_ROLE],
+    SQL_LAB_ROLE: [PUBLIC_ROLE],
+    PUBLIC_ROLE: []
+}
+```
+
+### Custom Role Creation
+```python
+from superset.security.manager import SupersetSecurityManager
+
+def create_custom_role(sm: SupersetSecurityManager):
+    """Create custom role with specific permissions."""
+
+    # Create role
+    analyst_role = sm.add_role('Data Analyst')
+
+    # Add view permissions
+    sm.add_permission_to_role(analyst_role, 'can_read', 'Chart')
+    sm.add_permission_to_role(analyst_role, 'can_write', 'Chart')
+    sm.add_permission_to_role(analyst_role, 'can_read', 'Dashboard')
+
+    # Add menu access
+    sm.add_permission_to_role(analyst_role, 'menu_access', 'Charts')
+    sm.add_permission_to_role(analyst_role, 'menu_access', 'Dashboards')
+
+    # Database-specific permissions
+    database = Database.get_by_name('analytics_db')
+    if database:
+        perm_view = sm.find_permission_view_menu('database_access', database.perm)
+        if perm_view:
+            sm.add_permission_to_role(analyst_role, perm_view)
+```
+
+### Dynamic Role Assignment
+```python
+def assign_role_based_on_department(user: User) -> None:
+    """Assign role based on user department."""
+    department = user.extra_attributes.get('department')
+
+    role_mapping = {
+        'data_science': 'Alpha',
+        'analytics': 'Data Analyst',
+        'marketing': 'Gamma',
+        'executive': 'Alpha'
+    }
+
+    role_name = role_mapping.get(department, 'Gamma')
+    role = security_manager.find_role(role_name)
+
+    if role and role not in user.roles:
+        user.roles.append(role)
+        db.session.commit()
+```
+
+## Resource-Level Permissions
+
+### Chart Permissions
+```python
+class ChartSecurityMixin:
+    """Security methods for chart access."""
+
+    def can_access_chart(self, chart: Slice) -> bool:
+        """Comprehensive chart access check."""
+        # Admin access
+        if security_manager.is_admin():
+            return True
+
+        # Owner access
+        if chart.created_by == security_manager.current_user:
+            return True
+
+        # Role-based access
+        if not security_manager.has_access('can_read', 'Chart'):
+            return False
+
+        # Datasource access
+        if not security_manager.can_access_datasource(chart.datasource):
+            return False
+
+        # Dashboard context (if chart is on dashboard)
+        if hasattr(self, 'dashboard') and self.dashboard:
+            if not security_manager.can_access_dashboard(self.dashboard):
+                return False
+
+        return True
+
+    def can_edit_chart(self, chart: Slice) -> bool:
+        """Check chart edit permissions."""
+        if not self.can_access_chart(chart):
+            return False
+
+        # Must have write permission
+        if not security_manager.has_access('can_write', 'Chart'):
+            return False
+
+        # Owner or admin can edit
+        return chart.created_by == security_manager.current_user or \
+               security_manager.is_admin()
+```
+
+### Dashboard Permissions
+```python
+class DashboardSecurityMixin:
+    """Security methods for dashboard access."""
+
+    def can_access_dashboard(self, dashboard: Dashboard) -> bool:
+        """Check dashboard access permissions."""
+        # Public dashboards
+        if dashboard.published:
+            return True
+
+        # Admin access
+        if security_manager.is_admin():
+            return True
+
+        # Owner access
+        if security_manager.current_user in dashboard.owners:
+            return True
+
+        # Role-based access
+        if not security_manager.has_access('can_read', 'Dashboard'):
+            return False
+
+        # Check all charts in dashboard
+        for chart in dashboard.slices:
+            if not security_manager.can_access_chart(chart):
+                return False
+
+        return True
+
+    def filter_accessible_charts(self, charts: list[Slice]) -> list[Slice]:
+        """Filter charts to only accessible ones."""
+        return [
+            chart for chart in charts
+            if security_manager.can_access_chart(chart)
+        ]
+```
+
+### Database Permissions
+```python
+class DatabaseSecurityMixin:
+    """Security methods for database access."""
+
+    def can_access_database(self, database: Database) -> bool:
+        """Check database access permissions."""
+        if security_manager.is_admin():
+            return True
+
+        # Check database-specific permission
+        perm = f"database_access_{database.id}"
+        return security_manager.has_access('can_read', perm)
+
+    def can_access_schema(self, database: Database, schema: str) -> bool:
+        """Check schema-level access."""
+        # Database access required
+        if not self.can_access_database(database):
+            return False
+
+        # Schema-specific permission
+        schema_perm = f"schema_access_{database.id}_{schema}"
+        return security_manager.has_access('can_read', schema_perm)
+
+    def get_accessible_schemas(self, database: Database) -> list[str]:
+        """Get list of schemas user can access."""
+        if not self.can_access_database(database):
+            return []
+
+        if security_manager.is_admin():
+            return database.get_all_schema_names()
+
+        # Filter by schema permissions
+        all_schemas = database.get_all_schema_names()
+        return [
+            schema for schema in all_schemas
+            if self.can_access_schema(database, schema)
+        ]
+```
+
+## Row-Level Security
+
+### RLS Implementation
+```python
+from superset.row_level_security.models import RowLevelSecurityFilter
+
+class RowLevelSecurityMixin:
+    """Row-level security functionality."""
+
+    def apply_rls_filters(self, query: Query, table: SqlaTable) -> Query:
+        """Apply row-level security filters to query."""
+        rls_filters = self.get_rls_filters(table)
+
+        for rls_filter in rls_filters:
+            if self.should_apply_filter(rls_filter):
+                filter_clause = self.build_filter_clause(rls_filter)
+                query = query.filter(text(filter_clause))
+
+        return query
+
+    def get_rls_filters(self, table: SqlaTable) -> list[RowLevelSecurityFilter]:
+        """Get applicable RLS filters for table."""
+        user_roles = [role.name for role in security_manager.current_user.roles]
+
+        return db.session.query(RowLevelSecurityFilter).filter(
+            RowLevelSecurityFilter.table_id == table.id,
+            RowLevelSecurityFilter.roles.any(Role.name.in_(user_roles))
+        ).all()
+
+    def build_filter_clause(self, rls_filter: RowLevelSecurityFilter) -> str:
+        """Build SQL filter clause from RLS filter."""
+        clause = rls_filter.clause
+
+        # Replace placeholders with user context
+        context = {
+            'current_user_id': security_manager.current_user.id,
+            'current_username': security_manager.current_user.username,
+            'current_user_email': security_manager.current_user.email
+        }
+
+        for key, value in context.items():
+            clause = clause.replace(f'{{{key}}}', str(value))
+
+        return clause
+```
+
+### RLS Configuration
+```python
+# Example RLS filter creation
+def create_rls_filter():
+    """Create row-level security filter."""
+
+    # Filter: users can only see their own records
+    user_filter = RowLevelSecurityFilter(
+        name="User Records Only",
+        table_id=sales_table.id,
+        clause="user_id = {current_user_id}",
+        description="Users can only see their own sales records"
+    )
+
+    # Apply to specific roles
+    gamma_role = security_manager.find_role('Gamma')
+    user_filter.roles.append(gamma_role)
+
+    db.session.add(user_filter)
+    db.session.commit()
+```
+
+## Authentication Integration
+
+### OAuth Configuration
+```python
+# OAuth configuration in superset_config.py
+from flask_appbuilder.security.manager import AUTH_OAUTH
+
+AUTH_TYPE = AUTH_OAUTH
+OAUTH_PROVIDERS = [
+    {
+        'name': 'google',
+        'token_key': 'access_token',
+        'icon': 'fa-google',
+        'remote_app': {
+            'client_id': 'GOOGLE_CLIENT_ID',
+            'client_secret': 'GOOGLE_CLIENT_SECRET',
+            'server_metadata_url': 'https://accounts.google.com/.well-known/openid_configuration',
+            'client_kwargs': {'scope': 'openid email profile'}
+        }
+    }
+]
+
+# Custom user creation from OAuth
+def auth_user_oauth(self, userinfo):
+    """Custom OAuth user creation."""
+    user = self.find_user(email=userinfo['email'])
+
+    if not user:
+        user = self.add_user(
+            username=userinfo['email'],
+            first_name=userinfo.get('given_name', ''),
+            last_name=userinfo.get('family_name', ''),
+            email=userinfo['email'],
+            role=self.find_role('Gamma')  # Default role
+        )
+
+    # Update user info from OAuth
+    user.first_name = userinfo.get('given_name', user.first_name)
+    user.last_name = userinfo.get('family_name', user.last_name)
+
+    return user
+```
+
+### LDAP Integration
+```python
+from flask_appbuilder.security.manager import AUTH_LDAP
+
+AUTH_TYPE = AUTH_LDAP
+AUTH_LDAP_SERVER = "ldap://ldap.company.com"
+AUTH_LDAP_USE_TLS = True
+AUTH_LDAP_BIND_USER = "cn=admin,dc=company,dc=com"
+AUTH_LDAP_BIND_PASSWORD = "admin_password"
+AUTH_LDAP_SEARCH = "dc=company,dc=com"
+AUTH_LDAP_UID_FIELD = "uid"
+
+# Map LDAP groups to Superset roles
+AUTH_ROLES_MAPPING = {
+    "cn=superset_admins,ou=groups,dc=company,dc=com": ["Admin"],
+    "cn=data_analysts,ou=groups,dc=company,dc=com": ["Alpha"],
+    "cn=business_users,ou=groups,dc=company,dc=com": ["Gamma"],
+}
+
+# Custom LDAP user creation
+def auth_user_ldap(self, username, userinfo, ldap_groups):
+    """Custom LDAP user creation with group mapping."""
+    user = self.find_user(username=username)
+
+    if not user:
+        # Create new user
+        user = self.add_user(
+            username=username,
+            first_name=userinfo.get('givenName', [''])[0],
+            last_name=userinfo.get('sn', [''])[0],
+            email=userinfo.get('mail', [''])[0],
+            role=self.find_role('Gamma')  # Default role
+        )
+
+    # Update roles based on LDAP groups
+    user.roles = []
+    for ldap_group in ldap_groups:
+        if ldap_group in AUTH_ROLES_MAPPING:
+            for role_name in AUTH_ROLES_MAPPING[ldap_group]:
+                role = self.find_role(role_name)
+                if role:
+                    user.roles.append(role)
+
+    return user
+```
+
+## Security Testing
+
+### Permission Testing
+```python
+class TestChartPermissions:
+    def test_admin_can_access_any_chart(self):
+        """Test admin access to all charts."""
+        self.login('admin')
+
+        chart = self.create_chart()
+        assert security_manager.can_access_chart(chart)
+        assert security_manager.can_edit_chart(chart)
+
+    def test_gamma_user_limited_access(self):
+        """Test gamma user restricted access."""
+        self.login('gamma_user')
+
+        # Can access public charts
+        public_chart = self.create_public_chart()
+        assert security_manager.can_access_chart(public_chart)
+
+        # Cannot access private charts
+        private_chart = self.create_private_chart()
+        assert not security_manager.can_access_chart(private_chart)
+
+    def test_owner_can_edit_own_chart(self):
+        """Test chart owners can edit their charts."""
+        user = self.create_user('chart_owner')
+        self.login(user.username)
+
+        chart = self.create_chart(owner=user)
+        assert security_manager.can_edit_chart(chart)
+```
+
+### RLS Testing
+```python
+class TestRowLevelSecurity:
+    def test_rls_filter_applied(self):
+        """Test RLS filters are applied to queries."""
+        # Create RLS filter
+        rls_filter = RowLevelSecurityFilter(
+            table_id=self.table.id,
+            clause="user_id = {current_user_id}",
+            roles=[self.gamma_role]
+        )
+        db.session.add(rls_filter)
+        db.session.commit()
+
+        # Login as gamma user
+        self.login('gamma_user')
+
+        # Execute query - should include RLS filter
+        query_obj = QueryObject(table=self.table, columns=['name'])
+        result = self.table.query(query_obj)
+
+        # Verify filter was applied
+        assert "user_id = 2" in result.query  # gamma_user.id = 2
+```
+
+## Security Best Practices
+
+### Configuration Security
+```python
+# Secure configuration practices
+SECRET_KEY = os.environ.get('SUPERSET_SECRET_KEY')  # Never hardcode
+WTF_CSRF_ENABLED = True
+WTF_CSRF_TIME_LIMIT = 3600
+
+# Session security
+SESSION_COOKIE_SECURE = True  # HTTPS only
+SESSION_COOKIE_HTTPONLY = True  # No JavaScript access
+SESSION_COOKIE_SAMESITE = 'Lax'
+
+# Database security
+SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')  # From environment
+ENCRYPT_PASSWORDS = True  # Encrypt stored passwords
+```
+
+### Input Validation
+```python
+from marshmallow import Schema, fields, validate
+
+class ChartDataSchema(Schema):
+    """Validate chart data requests."""
+
+    slice_name = fields.Str(
+        required=True,
+        validate=validate.Length(min=1, max=255)
+    )
+    viz_type = fields.Str(
+        required=True,
+        validate=validate.OneOf(['table', 'bar', 'line', 'pie'])
+    )
+    datasource_id = fields.Int(
+        required=True,
+        validate=validate.Range(min=1)
+    )
+
+# SQL injection prevention
+def safe_query_execution(query: str, params: dict) -> Any:
+    """Execute query safely with parameterization."""
+    # Use SQLAlchemy text() with bound parameters
+    safe_query = text(query)
+    return db.session.execute(safe_query, params)
+```
+
+### Audit Logging
+```python
+from superset.utils.log import get_event_logger
+
+def log_security_event(event_type: str, details: dict) -> None:
+    """Log security-related events."""
+    logger = get_event_logger()
+
+    logger.info(
+        f"Security Event: {event_type}",
+        extra={
+            'event_type': event_type,
+            'user_id': security_manager.current_user.id,
+            'username': security_manager.current_user.username,
+            'ip_address': request.remote_addr,
+            'user_agent': request.user_agent.string,
+            'details': details,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    )
+
+# Usage in security-sensitive operations
+@expose('/sensitive-data', methods=['GET'])
+@protect()
+def get_sensitive_data(self) -> Response:
+    log_security_event('sensitive_data_access', {
+        'resource': 'sensitive_data',
+        'action': 'read'
+    })
+
+    # Business logic here
+    pass
+```
+
+### Security Guidelines
+1. **Principle of Least Privilege** - Grant minimum necessary permissions
+2. **Defense in Depth** - Multiple security layers
+3. **Regular Security Reviews** - Audit permissions and access patterns
+4. **Secure Defaults** - New users get minimal permissions
+5. **Input Validation** - Validate all user inputs
+6. **Audit Logging** - Log security-relevant events
+7. **Regular Updates** - Keep dependencies updated for security patches

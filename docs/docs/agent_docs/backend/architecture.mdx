@@ -1,0 +1,362 @@
+# Backend Architecture
+
+Superset's backend follows a layered architecture with clear separation of concerns and established patterns for scalability and maintainability.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────┐
+│                API Layer                    │
+│  Flask routes, request/response handling    │
+├─────────────────────────────────────────────┤
+│              Commands Layer                 │
+│   Business logic, validation, orchestration │
+├─────────────────────────────────────────────┤
+│                DAO Layer                    │
+│    Data Access Objects, query building      │
+├─────────────────────────────────────────────┤
+│               Models Layer                  │
+│     SQLAlchemy models, relationships        │
+├─────────────────────────────────────────────┤
+│              Database Layer                 │
+│    PostgreSQL, MySQL, SQLite, etc.         │
+└─────────────────────────────────────────────┘
+```
+
+## Core Components
+
+### Models Layer (`/superset/models/`)
+
+The foundation layer containing SQLAlchemy ORM models.
+
+#### Key Models
+```python
+# Core entities
+Database         # Database connections
+Dataset          # Data sources (formerly DataSource)
+Dashboard        # Dashboard containers
+Slice           # Individual charts/visualizations
+Query           # SQL Lab queries
+User            # User accounts
+```
+
+#### Model Patterns
+```python
+# Base mixins provide common functionality
+class AuditMixinNullable:
+    created_on = Column(DateTime, default=datetime.now)
+    changed_on = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_by_fk = Column(Integer, ForeignKey('ab_user.id'))
+    changed_by_fk = Column(Integer, ForeignKey('ab_user.id'))
+
+# Example model structure
+class Dashboard(Model, AuditMixinNullable):
+    __tablename__ = 'dashboards'
+
+    id = Column(Integer, primary_key=True)
+    dashboard_title = Column(String(500))
+    position_json = Column(Text)
+    css = Column(Text)
+
+    # Relationships
+    slices = relationship("Slice", secondary=dashboard_slices)
+    owners = relationship("User", secondary=dashboard_user)
+```
+
+#### Model Reference Examples
+- **`/superset/models/core.py`** - Database, Dataset, Dashboard models
+- **`/superset/models/slice.py`** - Chart/Slice model
+- **`/superset/models/sql_lab.py`** - Query and Result models
+
+### DAO Layer (`/superset/daos/`)
+
+Data Access Objects provide a clean interface to database operations.
+
+```python
+# Base DAO pattern
+class BaseDAO(Generic[T]):
+    model_cls: type[Model] | None = None
+
+    @classmethod
+    def find_by_id(cls, model_id: str | int) -> T | None:
+        """Find model by primary key."""
+        return db.session.query(cls.model_cls).get(model_id)
+
+    @classmethod
+    def create(cls, attributes: dict[str, Any]) -> T:
+        """Create new model instance."""
+        instance = cls.model_cls(**attributes)
+        db.session.add(instance)
+        db.session.commit()
+        return instance
+
+    @classmethod
+    def update(cls, instance: T, attributes: dict[str, Any]) -> T:
+        """Update existing model instance."""
+        for key, value in attributes.items():
+            setattr(instance, key, value)
+        db.session.commit()
+        return instance
+```
+
+#### DAO Examples
+```python
+# Chart DAO
+class ChartDAO(BaseDAO[Slice]):
+    model_cls = Slice
+
+    @classmethod
+    def find_by_ids(cls, chart_ids: list[int]) -> list[Slice]:
+        return db.session.query(Slice).filter(Slice.id.in_(chart_ids)).all()
+
+    @classmethod
+    def get_charts_changed_after(cls, timestamp: datetime) -> list[Slice]:
+        return db.session.query(Slice).filter(
+            Slice.changed_on > timestamp
+        ).all()
+```
+
+#### DAO Reference Examples
+- **`/superset/daos/chart.py`** - Chart operations
+- **`/superset/daos/dashboard.py`** - Dashboard operations
+- **`/superset/daos/database.py`** - Database connection operations
+
+### Commands Layer (`/superset/commands/`)
+
+Commands encapsulate business logic and coordinate between layers.
+
+```python
+# Base command pattern
+class BaseCommand(ABC):
+    @abstractmethod
+    def run(self) -> Any:
+        """Execute the command."""
+        pass
+
+    @abstractmethod
+    def validate(self) -> None:
+        """Validate command prerequisites."""
+        pass
+
+# Implementation example
+class CreateChartCommand(BaseCommand):
+    def __init__(self, actor: User, data: dict[str, Any]):
+        self._actor = actor
+        self._properties = data.copy()
+
+    def run(self) -> Slice:
+        self.validate()
+        chart = ChartDAO.create(self._properties)
+        security_manager.set_perm(self._actor, 'can_edit', chart)
+        return chart
+
+    def validate(self) -> None:
+        # Validate required fields
+        if not self._properties.get('slice_name'):
+            raise ValidationError('Chart name is required')
+
+        # Validate permissions
+        datasource = DatasetDAO.find_by_id(self._properties['datasource_id'])
+        if not security_manager.can_access_datasource(datasource):
+            raise ForbiddenError('Access denied to datasource')
+```
+
+#### Command Patterns
+```python
+# CRUD commands
+CreateDashboardCommand
+UpdateDashboardCommand
+DeleteDashboardCommand
+CopyDashboardCommand
+
+# Specialized commands
+ExportDashboardCommand
+WarmUpCacheCommand
+RefreshDatasetCommand
+TestDatabaseConnectionCommand
+```
+
+#### Command Reference Examples
+- **`/superset/commands/chart/create.py`** - Chart creation logic
+- **`/superset/commands/dashboard/update.py`** - Dashboard update logic
+- **`/superset/commands/database/test_connection.py`** - Database testing
+
+### API Layer (`/superset/views/`)
+
+Flask routes and API endpoints built on top of Flask-AppBuilder.
+
+```python
+# Base API class
+class BaseSupersetModelRestApi(ModelRestApi):
+    """Base class for Superset model REST APIs."""
+
+    # Standardized endpoints
+    include_route_methods = {
+        RouteMethod.GET,
+        RouteMethod.GET_LIST,
+        RouteMethod.POST,
+        RouteMethod.PUT,
+        RouteMethod.DELETE
+    }
+
+    # Error handling
+    @handle_api_exception
+    def post(self) -> Response:
+        """Create new resource."""
+        try:
+            command = self.create_command_class()(
+                actor=g.user,
+                data=request.json
+            )
+            result = command.run()
+            return self.response(201, id=result.id)
+        except ValidationError as ex:
+            return self.response_422(message=str(ex))
+```
+
+#### API Patterns
+```python
+# Chart API example
+class ChartRestApi(BaseSupersetModelRestApi):
+    datamodel = SQLAInterface(Slice)
+
+    @expose('/<pk>/data', methods=['POST'])
+    @protect()
+    @statsd_metrics
+    def get_data(self, pk: int) -> Response:
+        """Get chart data."""
+        chart = ChartDAO.find_by_id(pk)
+        command = ChartDataCommand(chart, request.json)
+        result = command.run()
+        return self.response(200, result=result)
+```
+
+#### API Reference Examples
+- **`/superset/charts/api.py`** - Chart API endpoints
+- **`/superset/dashboards/api.py`** - Dashboard API endpoints
+- **`/superset/databases/api.py`** - Database API endpoints
+
+## Architectural Patterns
+
+### Request Flow
+```
+1. HTTP Request → Flask Route
+2. Route → API Controller
+3. Controller → Command
+4. Command → DAO
+5. DAO → Model/Database
+6. Response ← Model/Database
+7. Response ← DAO
+8. Response ← Command
+9. Response ← Controller
+10. HTTP Response ← Flask Route
+```
+
+### Error Handling
+```python
+# Standardized exception hierarchy
+class SupersetException(Exception):
+    """Base Superset exception."""
+    pass
+
+class ValidationError(SupersetException):
+    """Data validation failed."""
+    pass
+
+class ForbiddenError(SupersetException):
+    """Access denied."""
+    pass
+
+# API error handling
+@handle_api_exception
+def api_method(self):
+    try:
+        # Business logic
+        pass
+    except ValidationError as ex:
+        return self.response_422(message=str(ex))
+    except ForbiddenError as ex:
+        return self.response_403(message=str(ex))
+```
+
+### Security Integration
+```python
+# Permission decorators
+@has_access
+@has_access_api
+@protect()
+
+# Example usage
+class ChartRestApi(BaseSupersetModelRestApi):
+    @expose('/data', methods=['POST'])
+    @protect()
+    @statsd_metrics
+    def get_data(self) -> Response:
+        # Permission check automatically applied
+        pass
+```
+
+## Extension Points
+
+### Database Engine Specs
+Add support for new databases by implementing engine specifications:
+
+```python
+# /superset/db_engine_specs/my_database.py
+class MyDatabaseEngineSpec(BaseEngineSpec):
+    engine = "my_database"
+    engine_name = "My Database"
+
+    @classmethod
+    def get_connection_str(cls, database: Database) -> str:
+        # Custom connection string logic
+        pass
+```
+
+### Visualization Plugins
+Backend support for custom visualizations:
+
+```python
+# Register new viz type
+viz_types = {
+    'my_chart_type': {
+        'label': 'My Chart Type',
+        'requiresTime': False,
+        'supportsTrendline': True
+    }
+}
+```
+
+### Custom Commands
+Extend functionality with custom commands:
+
+```python
+class CustomBusinessLogicCommand(BaseCommand):
+    def run(self) -> Any:
+        # Custom business logic
+        pass
+
+    def validate(self) -> None:
+        # Custom validation
+        pass
+```
+
+## Best Practices
+
+### Architecture Guidelines
+1. **Separation of Concerns**: Keep layers focused on their responsibilities
+2. **Dependency Direction**: Higher layers depend on lower layers, not vice versa
+3. **Interface Consistency**: Use established patterns for new features
+4. **Error Handling**: Use standardized exception hierarchy
+
+### Code Organization
+1. **Feature-based**: Group related functionality together
+2. **Single Responsibility**: Each class/function has one clear purpose
+3. **Composition over Inheritance**: Prefer composition for complex relationships
+4. **Type Safety**: Use type hints throughout the codebase
+
+### Performance Considerations
+1. **Query Optimization**: Use efficient database queries
+2. **Caching**: Implement appropriate caching strategies
+3. **Async Operations**: Use Celery for long-running tasks
+4. **Resource Management**: Properly manage database connections

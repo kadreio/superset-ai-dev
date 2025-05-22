@@ -1,0 +1,707 @@
+# Backend Cookbook
+
+Copy-paste ready examples for common Superset backend development tasks. Each recipe includes complete, working code that you can adapt to your needs.
+
+## 🍳 Creating Your First Feature
+
+### Recipe: Add a Simple API Endpoint
+**Use Case**: You want to add a new API endpoint to get chart statistics.
+
+```python
+# 1. Create the command (business logic)
+# /superset/commands/chart/stats.py
+from superset.commands.base import BaseCommand
+from superset.daos.chart import ChartDAO
+from superset.exceptions import ValidationError
+
+class GetChartStatsCommand(BaseCommand):
+    def __init__(self, chart_id: int):
+        self._chart_id = chart_id
+
+    def run(self) -> dict[str, Any]:
+        self.validate()
+
+        chart = ChartDAO.find_by_id(self._chart_id)
+
+        return {
+            'chart_id': chart.id,
+            'chart_name': chart.slice_name,
+            'dashboard_count': len(chart.dashboards),
+            'created_on': chart.created_on.isoformat(),
+            'last_modified': chart.changed_on.isoformat(),
+            'view_count': self._get_view_count(chart)
+        }
+
+    def validate(self) -> None:
+        chart = ChartDAO.find_by_id(self._chart_id)
+        if not chart:
+            raise ValidationError(f'Chart {self._chart_id} not found')
+
+    def _get_view_count(self, chart: Slice) -> int:
+        # Implement view count logic
+        return 0  # Placeholder
+
+# 2. Add the API endpoint
+# /superset/charts/api.py (add to existing ChartRestApi class)
+@expose('/<int:pk>/stats', methods=['GET'])
+@protect()
+@safe
+def get_stats(self, pk: int) -> Response:
+    """Get chart statistics."""
+    try:
+        command = GetChartStatsCommand(pk)
+        result = command.run()
+        return self.response(200, result=result)
+    except ValidationError as ex:
+        return self.response_404(message=str(ex))
+
+# 3. Write tests
+# /tests/unit_tests/charts/test_stats.py
+class TestChartStatsCommand:
+    def test_get_chart_stats_success(self):
+        chart = self.create_chart()
+        command = GetChartStatsCommand(chart.id)
+        result = command.run()
+
+        assert result['chart_id'] == chart.id
+        assert result['chart_name'] == chart.slice_name
+        assert 'dashboard_count' in result
+
+    def test_get_stats_nonexistent_chart(self):
+        command = GetChartStatsCommand(999)
+        with pytest.raises(ValidationError):
+            command.run()
+```
+
+### Recipe: Add a Database Model
+**Use Case**: You want to track chart view history.
+
+```python
+# 1. Create the model
+# /superset/models/chart_views.py
+from superset.models.base import BaseModel
+from superset.models.mixins import AuditMixinNullable
+
+class ChartView(BaseModel, AuditMixinNullable):
+    __tablename__ = 'chart_views'
+
+    id = Column(Integer, primary_key=True)
+    chart_id = Column(Integer, ForeignKey('slices.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('ab_user.id'), nullable=True)
+    ip_address = Column(String(45))  # Support IPv6
+    user_agent = Column(Text)
+    duration_ms = Column(Integer)  # Time spent viewing
+
+    # Relationships
+    chart = relationship('Slice', back_populates='views')
+    user = relationship('User')
+
+    def __repr__(self):
+        return f'<ChartView {self.chart_id} by {self.user_id}>'
+
+# 2. Update the Chart model to include the relationship
+# Add to /superset/models/slice.py
+class Slice(Model, AuditMixinNullable):
+    # ... existing fields ...
+
+    # Add this relationship
+    views = relationship('ChartView', back_populates='chart')
+
+# 3. Create migration
+# Run: superset db migrate -m "Add chart views tracking"
+# Edit the generated migration file:
+def upgrade():
+    op.create_table(
+        'chart_views',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('chart_id', sa.Integer(), nullable=False),
+        sa.Column('user_id', sa.Integer(), nullable=True),
+        sa.Column('ip_address', sa.String(45), nullable=True),
+        sa.Column('user_agent', sa.Text(), nullable=True),
+        sa.Column('duration_ms', sa.Integer(), nullable=True),
+        sa.Column('created_on', sa.DateTime(), nullable=True),
+        sa.Column('changed_on', sa.DateTime(), nullable=True),
+        sa.Column('created_by_fk', sa.Integer(), nullable=True),
+        sa.Column('changed_by_fk', sa.Integer(), nullable=True),
+        sa.ForeignKeyConstraint(['chart_id'], ['slices.id']),
+        sa.ForeignKeyConstraint(['user_id'], ['ab_user.id']),
+        sa.ForeignKeyConstraint(['created_by_fk'], ['ab_user.id']),
+        sa.ForeignKeyConstraint(['changed_by_fk'], ['ab_user.id']),
+        sa.PrimaryKeyConstraint('id')
+    )
+
+    # Add indexes for performance
+    op.create_index('idx_chart_views_chart_id', 'chart_views', ['chart_id'])
+    op.create_index('idx_chart_views_created_on', 'chart_views', ['created_on'])
+
+# 4. Create DAO for the new model
+# /superset/daos/chart_views.py
+from superset.daos.base import BaseDAO
+from superset.models.chart_views import ChartView
+
+class ChartViewDAO(BaseDAO[ChartView]):
+    model_cls = ChartView
+
+    @classmethod
+    def log_view(cls, chart_id: int, user_id: int | None,
+                 ip_address: str, user_agent: str, duration_ms: int) -> ChartView:
+        """Log a chart view."""
+        view = cls.create({
+            'chart_id': chart_id,
+            'user_id': user_id,
+            'ip_address': ip_address,
+            'user_agent': user_agent,
+            'duration_ms': duration_ms
+        })
+        return view
+
+    @classmethod
+    def get_chart_view_stats(cls, chart_id: int, days: int = 30) -> dict:
+        """Get view statistics for a chart."""
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        views = db.session.query(ChartView).filter(
+            ChartView.chart_id == chart_id,
+            ChartView.created_on >= cutoff_date
+        ).all()
+
+        return {
+            'total_views': len(views),
+            'unique_users': len(set(v.user_id for v in views if v.user_id)),
+            'avg_duration_ms': sum(v.duration_ms or 0 for v in views) / max(len(views), 1)
+        }
+```
+
+## 🔄 Background Tasks & Async Operations
+
+### Recipe: Create a Background Task
+**Use Case**: You want to warm up chart caches in the background.
+
+```python
+# 1. Create the task
+# /superset/tasks/chart_cache.py
+from celery import current_task
+from superset.tasks.celery_app import celery_app
+from superset.commands.chart.data import ChartDataCommand
+from superset.daos.chart import ChartDAO
+
+@celery_app.task(bind=True, soft_time_limit=300)
+def warm_chart_cache(self, chart_ids: list[int]) -> dict[str, Any]:
+    """Warm up cache for multiple charts."""
+    results = {
+        'success': [],
+        'failed': [],
+        'total': len(chart_ids)
+    }
+
+    for i, chart_id in enumerate(chart_ids):
+        try:
+            # Update task progress
+            current_task.update_state(
+                state='PROGRESS',
+                meta={'current': i + 1, 'total': len(chart_ids)}
+            )
+
+            chart = ChartDAO.find_by_id(chart_id)
+            if not chart:
+                results['failed'].append({
+                    'chart_id': chart_id,
+                    'error': 'Chart not found'
+                })
+                continue
+
+            # Execute chart query to warm cache
+            if chart.query_context:
+                command = ChartDataCommand(chart, json.loads(chart.query_context))
+                command.run()
+                results['success'].append(chart_id)
+            else:
+                results['failed'].append({
+                    'chart_id': chart_id,
+                    'error': 'No query context'
+                })
+
+        except Exception as ex:
+            results['failed'].append({
+                'chart_id': chart_id,
+                'error': str(ex)
+            })
+
+    return results
+
+# 2. Create command to trigger the task
+# /superset/commands/chart/warm_cache.py
+class WarmChartCacheCommand(BaseCommand):
+    def __init__(self, chart_ids: list[int]):
+        self._chart_ids = chart_ids
+
+    def run(self) -> str:
+        """Submit cache warming task and return task ID."""
+        self.validate()
+
+        task = warm_chart_cache.delay(self._chart_ids)
+        return task.id
+
+    def validate(self) -> None:
+        if not self._chart_ids:
+            raise ValidationError('No chart IDs provided')
+
+        # Validate chart IDs exist
+        for chart_id in self._chart_ids:
+            if not ChartDAO.find_by_id(chart_id):
+                raise ValidationError(f'Chart {chart_id} not found')
+
+# 3. Add API endpoint to trigger task
+# Add to /superset/charts/api.py
+@expose('/warm-cache', methods=['POST'])
+@protect()
+@safe
+def warm_cache(self) -> Response:
+    """Warm up cache for multiple charts."""
+    try:
+        chart_ids = request.json.get('chart_ids', [])
+        command = WarmChartCacheCommand(chart_ids)
+        task_id = command.run()
+
+        return self.response(202, task_id=task_id, message="Cache warming started")
+    except ValidationError as ex:
+        return self.response_422(message=str(ex))
+
+# 4. Add endpoint to check task status
+@expose('/task-status/<task_id>', methods=['GET'])
+@protect()
+@safe
+def get_task_status(self, task_id: str) -> Response:
+    """Get status of background task."""
+    from celery.result import AsyncResult
+
+    result = AsyncResult(task_id)
+
+    if result.ready():
+        return self.response(200,
+            status='completed',
+            result=result.get(),
+            success=result.successful()
+        )
+    else:
+        return self.response(200,
+            status='running',
+            progress=result.info.get('current', 0) if result.info else 0,
+            total=result.info.get('total', 0) if result.info else 0
+        )
+```
+
+### Recipe: Scheduled Background Tasks
+**Use Case**: You want to clean up old chart view logs daily.
+
+```python
+# /superset/tasks/cleanup.py
+from celery.schedules import crontab
+from superset.tasks.celery_app import celery_app
+
+@celery_app.task
+def cleanup_old_chart_views():
+    """Clean up chart views older than 90 days."""
+    cutoff_date = datetime.utcnow() - timedelta(days=90)
+
+    deleted_count = db.session.query(ChartView).filter(
+        ChartView.created_on < cutoff_date
+    ).delete()
+
+    db.session.commit()
+
+    logger.info(f"Cleaned up {deleted_count} old chart views")
+    return {'deleted_count': deleted_count}
+
+# Configure in superset_config.py
+CELERY_BEAT_SCHEDULE = {
+    'cleanup-old-chart-views': {
+        'task': 'superset.tasks.cleanup.cleanup_old_chart_views',
+        'schedule': crontab(hour=2, minute=0),  # Run daily at 2 AM
+    },
+}
+```
+
+## 🗄️ Database Patterns
+
+### Recipe: Complex Queries with SQLAlchemy
+**Use Case**: You need to get dashboard statistics with multiple joins.
+
+```python
+# /superset/daos/dashboard.py
+class DashboardDAO(BaseDAO[Dashboard]):
+    @classmethod
+    def get_dashboard_stats(cls, days: int = 30) -> list[dict]:
+        """Get dashboard statistics with chart and view counts."""
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        # Complex query with multiple joins and aggregations
+        query = db.session.query(
+            Dashboard.id,
+            Dashboard.dashboard_title,
+            Dashboard.published,
+            func.count(distinct(DashboardSlice.slice_id)).label('chart_count'),
+            func.count(distinct(ChartView.id)).label('total_views'),
+            func.count(distinct(ChartView.user_id)).label('unique_viewers')
+        ).outerjoin(
+            DashboardSlice, Dashboard.id == DashboardSlice.dashboard_id
+        ).outerjoin(
+            ChartView,
+            and_(
+                DashboardSlice.slice_id == ChartView.chart_id,
+                ChartView.created_on >= cutoff_date
+            )
+        ).group_by(
+            Dashboard.id, Dashboard.dashboard_title, Dashboard.published
+        ).order_by(
+            desc('total_views')
+        )
+
+        results = []
+        for row in query.all():
+            results.append({
+                'id': row.id,
+                'title': row.dashboard_title,
+                'published': row.published,
+                'chart_count': row.chart_count,
+                'total_views': row.total_views,
+                'unique_viewers': row.unique_viewers,
+                'views_per_chart': row.total_views / max(row.chart_count, 1)
+            })
+
+        return results
+
+    @classmethod
+    def get_popular_dashboards(cls, limit: int = 10) -> list[Dashboard]:
+        """Get most viewed dashboards with optimized loading."""
+        # Use subquery for performance
+        view_counts = db.session.query(
+            DashboardSlice.dashboard_id,
+            func.count(ChartView.id).label('view_count')
+        ).join(
+            ChartView, DashboardSlice.slice_id == ChartView.chart_id
+        ).group_by(
+            DashboardSlice.dashboard_id
+        ).subquery()
+
+        return db.session.query(Dashboard).join(
+            view_counts, Dashboard.id == view_counts.c.dashboard_id
+        ).options(
+            selectinload(Dashboard.slices),
+            selectinload(Dashboard.owners)
+        ).order_by(
+            desc(view_counts.c.view_count)
+        ).limit(limit).all()
+```
+
+### Recipe: Bulk Operations
+**Use Case**: You need to update many records efficiently.
+
+```python
+# Bulk insert
+def bulk_create_chart_views(view_data: list[dict]) -> None:
+    """Efficiently create many chart view records."""
+    # Add timestamps
+    now = datetime.utcnow()
+    for data in view_data:
+        data['created_on'] = now
+        data['changed_on'] = now
+
+    db.session.bulk_insert_mappings(ChartView, view_data)
+    db.session.commit()
+
+# Bulk update
+def bulk_update_chart_metadata(updates: list[dict]) -> None:
+    """Efficiently update many chart records."""
+    # Each dict should have 'id' and fields to update
+    for update in updates:
+        update['changed_on'] = datetime.utcnow()
+
+    db.session.bulk_update_mappings(Slice, updates)
+    db.session.commit()
+
+# Efficient batch processing
+def process_charts_in_batches(chart_ids: list[int], batch_size: int = 100):
+    """Process charts in batches to avoid memory issues."""
+    for i in range(0, len(chart_ids), batch_size):
+        batch = chart_ids[i:i + batch_size]
+
+        charts = db.session.query(Slice).filter(
+            Slice.id.in_(batch)
+        ).options(
+            selectinload(Slice.datasource)
+        ).all()
+
+        for chart in charts:
+            # Process each chart
+            process_single_chart(chart)
+
+        # Commit after each batch
+        db.session.commit()
+```
+
+## 🔐 Security Patterns
+
+### Recipe: Custom Permission Check
+**Use Case**: You want to implement custom business logic for chart access.
+
+```python
+# /superset/security/custom_permissions.py
+from superset.security.manager import SupersetSecurityManager
+
+class CustomSecurityManager(SupersetSecurityManager):
+    def can_access_chart_advanced(self, chart: Slice, context: dict = None) -> bool:
+        """Advanced chart access with business logic."""
+        # Standard permission check first
+        if not self.can_access_chart(chart):
+            return False
+
+        # Custom business rules
+        user = self.current_user
+
+        # Example: Restrict access to sensitive charts during business hours
+        if chart.slice_name.startswith('SENSITIVE_'):
+            if not self._is_business_hours():
+                return False
+            if not self._user_has_sensitive_access(user):
+                return False
+
+        # Example: Restrict access based on chart age
+        if context and context.get('enforce_retention'):
+            max_age_days = context.get('max_age_days', 365)
+            if self._chart_too_old(chart, max_age_days):
+                return False
+
+        return True
+
+    def _is_business_hours(self) -> bool:
+        """Check if current time is during business hours."""
+        now = datetime.now()
+        return 9 <= now.hour <= 17 and now.weekday() < 5
+
+    def _user_has_sensitive_access(self, user: User) -> bool:
+        """Check if user has access to sensitive data."""
+        sensitive_roles = ['Admin', 'Data Steward']
+        return any(role.name in sensitive_roles for role in user.roles)
+
+    def _chart_too_old(self, chart: Slice, max_age_days: int) -> bool:
+        """Check if chart is older than retention policy."""
+        age = datetime.utcnow() - chart.created_on
+        return age.days > max_age_days
+
+# Configure in superset_config.py
+CUSTOM_SECURITY_MANAGER = CustomSecurityManager
+```
+
+### Recipe: Row-Level Security Implementation
+**Use Case**: Users should only see their own department's data.
+
+```python
+# /superset/security/rls.py
+def create_department_rls_filters():
+    """Create RLS filters for department-based access."""
+
+    # Sales table - users see only their department
+    sales_filter = RowLevelSecurityFilter(
+        name="Department Access - Sales",
+        table_id=sales_table.id,
+        clause="department = '{{ current_user_department() }}'",
+        description="Users can only see their department's sales data"
+    )
+
+    # Apply to non-admin roles
+    gamma_role = security_manager.find_role('Gamma')
+    alpha_role = security_manager.find_role('Alpha')
+    sales_filter.roles.extend([gamma_role, alpha_role])
+
+    db.session.add(sales_filter)
+    db.session.commit()
+
+# Custom Jinja function for RLS
+def current_user_department() -> str:
+    """Get current user's department for RLS filtering."""
+    user = security_manager.current_user
+    if user and hasattr(user, 'extra_attributes'):
+        return user.extra_attributes.get('department', 'unknown')
+    return 'unknown'
+
+# Register the function in superset_config.py
+JINJA_CONTEXT_ADDONS = {
+    'current_user_department': current_user_department,
+}
+```
+
+## 🚀 Performance Optimization
+
+### Recipe: Query Caching Strategy
+**Use Case**: You want to implement smart caching for expensive queries.
+
+```python
+# /superset/utils/smart_cache.py
+from superset.utils.cache import cache
+
+class SmartCacheManager:
+    """Intelligent caching with invalidation strategies."""
+
+    @staticmethod
+    def cache_chart_data(chart_id: int, query_hash: str, timeout: int = None):
+        """Cache chart data with smart timeout calculation."""
+        if timeout is None:
+            chart = ChartDAO.find_by_id(chart_id)
+            timeout = SmartCacheManager._calculate_timeout(chart)
+
+        def decorator(func):
+            cache_key = f"chart_data_{chart_id}_{query_hash}"
+            return cache.memoize(timeout=timeout, key_prefix=cache_key)(func)
+        return decorator
+
+    @staticmethod
+    def _calculate_timeout(chart: Slice) -> int:
+        """Calculate cache timeout based on chart characteristics."""
+        base_timeout = 3600  # 1 hour default
+
+        # Longer cache for less frequently updated data
+        if chart.datasource.sql and 'historical' in chart.datasource.sql.lower():
+            return base_timeout * 24  # 24 hours for historical data
+
+        # Shorter cache for real-time dashboards
+        if any('real-time' in dash.dashboard_title.lower()
+               for dash in chart.dashboards):
+            return 300  # 5 minutes for real-time
+
+        return base_timeout
+
+    @staticmethod
+    def invalidate_chart_cache(chart_id: int):
+        """Invalidate all cache entries for a chart."""
+        pattern = f"chart_data_{chart_id}_*"
+        cache.delete_many_by_pattern(pattern)
+
+    @staticmethod
+    def warm_popular_charts():
+        """Proactively warm cache for popular charts."""
+        popular_charts = DashboardDAO.get_popular_charts(limit=50)
+
+        for chart in popular_charts:
+            try:
+                if chart.query_context:
+                    command = ChartDataCommand(chart, json.loads(chart.query_context))
+                    command.run()  # This will populate the cache
+            except Exception as ex:
+                logger.warning(f"Failed to warm cache for chart {chart.id}: {ex}")
+
+# Usage in chart data command
+class ChartDataCommand(BaseCommand):
+    @SmartCacheManager.cache_chart_data(chart_id=self._chart.id, query_hash=self._query_hash)
+    def _get_cached_data(self) -> dict:
+        """Get chart data with smart caching."""
+        return self._execute_query()
+```
+
+### Recipe: Database Connection Optimization
+**Use Case**: You want to optimize database connections for high load.
+
+```python
+# /superset/utils/db_optimization.py
+from contextlib import contextmanager
+from sqlalchemy import event
+from sqlalchemy.pool import Pool
+
+class DatabaseOptimizer:
+    """Database connection and query optimization utilities."""
+
+    @staticmethod
+    def configure_connection_pool(engine):
+        """Configure optimal connection pool settings."""
+        # Listen for connection events
+        @event.listens_for(Pool, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            if 'sqlite' in str(dbapi_connection):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.close()
+
+        @event.listens_for(Pool, "checkout")
+        def receive_checkout(dbapi_connection, connection_record, connection_proxy):
+            # Set connection-specific optimizations
+            if hasattr(dbapi_connection, 'set_client_encoding'):
+                dbapi_connection.set_client_encoding('UTF8')
+
+    @staticmethod
+    @contextmanager
+    def optimized_query_session():
+        """Context manager for optimized database queries."""
+        # Use a separate session for read-only operations
+        session = db.create_scoped_session()
+
+        try:
+            # Optimize for read-heavy workloads
+            session.execute(text("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            session.execute(text("SET SESSION sql_mode = 'TRADITIONAL'"))
+
+            yield session
+        finally:
+            session.close()
+
+    @staticmethod
+    def analyze_slow_queries():
+        """Analyze and log slow queries."""
+        slow_queries = []
+
+        @event.listens_for(db.engine, "before_cursor_execute")
+        def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+            context._query_start_time = time.time()
+
+        @event.listens_for(db.engine, "after_cursor_execute")
+        def receive_after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+            total = time.time() - context._query_start_time
+            if total > 1.0:  # Log queries taking more than 1 second
+                slow_queries.append({
+                    'query': statement,
+                    'duration': total,
+                    'timestamp': datetime.utcnow()
+                })
+                logger.warning(f"Slow query ({total:.2f}s): {statement[:200]}...")
+
+        return slow_queries
+
+# Usage in high-load scenarios
+@DatabaseOptimizer.cache_with_optimization(timeout=1800)
+def get_dashboard_data_optimized(dashboard_id: int) -> dict:
+    """Get dashboard data with database optimizations."""
+    with DatabaseOptimizer.optimized_query_session() as session:
+        dashboard = session.query(Dashboard).options(
+            selectinload(Dashboard.slices).selectinload(Slice.datasource)
+        ).get(dashboard_id)
+
+        return {
+            'id': dashboard.id,
+            'title': dashboard.dashboard_title,
+            'charts': [chart.id for chart in dashboard.slices]
+        }
+```
+
+---
+
+## 🎯 Usage Tips
+
+### **Finding Recipes**
+- Use Ctrl+F to search for specific patterns
+- Look for 🍳 emoji to find recipe sections
+- Check the "Use Case" descriptions to find relevant examples
+
+### **Adapting Recipes**
+- Replace model names with your specific entities
+- Adjust validation logic for your business rules
+- Modify error handling for your use cases
+- Update field names to match your schema
+
+### **Testing Recipes**
+- Always write tests for your adaptations
+- Use the test patterns shown in each recipe
+- Test both success and error scenarios
+- Include edge cases specific to your implementation
+
+### **Contributing**
+Found a useful pattern not covered here? Consider adding it to improve this cookbook for everyone!

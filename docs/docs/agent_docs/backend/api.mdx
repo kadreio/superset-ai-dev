@@ -1,0 +1,480 @@
+# API Development
+
+Guide to developing REST APIs in Superset using Flask-AppBuilder and following established patterns.
+
+## API Architecture
+
+Superset APIs follow a layered architecture with standardized patterns:
+
+```
+┌─────────────────────────────────────────────┐
+│              API Endpoints                  │
+│  Flask routes with decorators & validation  │
+├─────────────────────────────────────────────┤
+│             Commands Layer                  │
+│     Business logic & orchestration         │
+├─────────────────────────────────────────────┤
+│               DAO Layer                     │
+│        Database operations                  │
+├─────────────────────────────────────────────┤
+│              Models Layer                   │
+│         SQLAlchemy models                   │
+└─────────────────────────────────────────────┘
+```
+
+## Base API Classes
+
+### BaseSupersetModelRestApi
+Foundation for all model-based APIs:
+
+```python
+from superset.views.base_api import BaseSupersetModelRestApi
+from flask_appbuilder.models.sqla.interface import SQLAInterface
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    datamodel = SQLAInterface(Slice)
+
+    # Define allowed HTTP methods
+    include_route_methods = {
+        RouteMethod.GET,
+        RouteMethod.GET_LIST,
+        RouteMethod.POST,
+        RouteMethod.PUT,
+        RouteMethod.DELETE
+    }
+
+    # Define response fields
+    list_columns = [
+        'id', 'slice_name', 'description',
+        'viz_type', 'datasource_id'
+    ]
+
+    show_columns = [
+        'id', 'slice_name', 'description', 'viz_type',
+        'params', 'query_context', 'created_on', 'changed_on'
+    ]
+
+    # Define searchable fields
+    search_columns = ['slice_name', 'description', 'viz_type']
+
+    # Define filterable fields
+    base_filters = [['id', FilterRelatedOwners, lambda: []]]
+```
+
+### Standard Endpoints
+Base class automatically provides:
+- `GET /api/v1/chart/` - List charts
+- `GET /api/v1/chart/<id>` - Get specific chart
+- `POST /api/v1/chart/` - Create chart
+- `PUT /api/v1/chart/<id>` - Update chart
+- `DELETE /api/v1/chart/<id>` - Delete chart
+
+## Custom API Endpoints
+
+### Adding Custom Endpoints
+```python
+from flask_appbuilder.api import expose, protect, safe
+from flask import request, Response
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    # ... base configuration ...
+
+    @expose('/data', methods=['POST'])
+    @protect()
+    @safe
+    @statsd_metrics
+    def get_data(self, pk: int) -> Response:
+        """Get chart data with query context."""
+        try:
+            chart = ChartDAO.find_by_id(pk)
+            if not chart:
+                return self.response_404()
+
+            # Validate permissions
+            if not security_manager.can_access_chart(chart):
+                return self.response_403()
+
+            # Execute command
+            command = ChartDataCommand(chart, request.json)
+            result = command.run()
+
+            return self.response(200, result=result)
+
+        except ValidationError as ex:
+            return self.response_422(message=str(ex))
+        except Exception as ex:
+            logger.exception("Error getting chart data")
+            return self.response_500(message="Internal server error")
+
+    @expose('/export', methods=['GET'])
+    @protect()
+    @safe
+    def export_charts(self) -> Response:
+        """Export charts as JSON."""
+        try:
+            chart_ids = request.args.getlist('id', type=int)
+            command = ExportChartsCommand(chart_ids)
+            result = command.run()
+
+            return Response(
+                result,
+                mimetype='application/json',
+                headers={'Content-Disposition': 'attachment; filename=charts.json'}
+            )
+
+        except ForbiddenError as ex:
+            return self.response_403(message=str(ex))
+```
+
+### Endpoint Decorators
+Essential decorators for API endpoints:
+
+```python
+@expose('/endpoint', methods=['POST'])  # Define route and HTTP methods
+@protect()                              # Apply security/permissions
+@safe                                   # Handle exceptions gracefully
+@statsd_metrics                         # Collect metrics
+@handle_api_exception                   # Standardized error handling
+def custom_endpoint(self) -> Response:
+    pass
+```
+
+## Request Handling
+
+### Request Validation
+```python
+from marshmallow import Schema, fields, validate
+
+class ChartDataRequestSchema(Schema):
+    datasource = fields.Dict(required=True)
+    queries = fields.List(fields.Dict(), required=True)
+    result_format = fields.Str(validate=validate.OneOf(['json', 'csv']))
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    @expose('/data', methods=['POST'])
+    @protect()
+    def get_data(self) -> Response:
+        # Validate request data
+        schema = ChartDataRequestSchema()
+        try:
+            data = schema.load(request.json)
+        except ValidationError as ex:
+            return self.response_422(message=ex.messages)
+
+        # Process validated data
+        command = ChartDataCommand(data)
+        result = command.run()
+        return self.response(200, result=result)
+```
+
+### File Upload Handling
+```python
+@expose('/upload', methods=['POST'])
+@protect()
+def upload_file(self) -> Response:
+    """Handle file upload."""
+    if 'file' not in request.files:
+        return self.response_400(message="No file provided")
+
+    file = request.files['file']
+    if file.filename == '':
+        return self.response_400(message="No file selected")
+
+    # Validate file type
+    allowed_extensions = {'csv', 'xlsx', 'json'}
+    if not file.filename.split('.')[-1].lower() in allowed_extensions:
+        return self.response_400(message="Invalid file type")
+
+    # Process file
+    command = ProcessFileCommand(file)
+    result = command.run()
+    return self.response(200, result=result)
+```
+
+## Response Handling
+
+### Standard Response Format
+```python
+# Success responses
+return self.response(200, result=data)           # 200 OK with data
+return self.response(201, id=created_id)         # 201 Created
+return self.response(204)                        # 204 No Content
+
+# Error responses
+return self.response_400(message="Bad request")  # 400 Bad Request
+return self.response_403(message="Forbidden")    # 403 Forbidden
+return self.response_404()                       # 404 Not Found
+return self.response_422(message="Validation error")  # 422 Unprocessable Entity
+return self.response_500(message="Server error") # 500 Internal Server Error
+```
+
+### Custom Response Formatting
+```python
+def custom_response(self, data: Any, status_code: int = 200) -> Response:
+    """Create custom formatted response."""
+    response_data = {
+        'success': status_code < 400,
+        'data': data,
+        'timestamp': datetime.utcnow().isoformat(),
+        'version': '1.0'
+    }
+
+    return Response(
+        json.dumps(response_data, default=json_encoder),
+        status=status_code,
+        mimetype='application/json'
+    )
+```
+
+## Authentication & Authorization
+
+### Permission Decorators
+```python
+from superset.views.base import requires_json
+from flask_appbuilder.security.decorators import has_access_api
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    @expose('/sensitive-data', methods=['GET'])
+    @has_access_api
+    @protect()
+    def get_sensitive_data(self) -> Response:
+        """Endpoint requiring specific permissions."""
+        # Permissions automatically checked
+        pass
+
+    @expose('/admin-only', methods=['POST'])
+    @protect()
+    def admin_endpoint(self) -> Response:
+        """Admin-only endpoint."""
+        if not security_manager.is_admin():
+            return self.response_403(message="Admin access required")
+        # Admin logic here
+        pass
+```
+
+### Custom Permission Checks
+```python
+def check_chart_access(self, chart: Slice) -> bool:
+    """Check if user can access specific chart."""
+    return security_manager.can_access_chart(chart)
+
+@expose('/chart/<int:pk>/data', methods=['GET'])
+@protect()
+def get_chart_data(self, pk: int) -> Response:
+    chart = ChartDAO.find_by_id(pk)
+    if not chart:
+        return self.response_404()
+
+    if not self.check_chart_access(chart):
+        return self.response_403(message="Access denied to chart")
+
+    # Proceed with data retrieval
+    pass
+```
+
+## Error Handling
+
+### Structured Exception Handling
+```python
+from superset.exceptions import SupersetException, ValidationError, ForbiddenError
+
+class ChartRestApi(BaseSupersetModelRestApi):
+    @expose('/data', methods=['POST'])
+    @protect()
+    @handle_api_exception
+    def get_data(self) -> Response:
+        """Get chart data with comprehensive error handling."""
+        try:
+            # Validate request
+            if not request.json:
+                raise ValidationError("Request body required")
+
+            # Execute command
+            command = ChartDataCommand(request.json)
+            result = command.run()
+
+            return self.response(200, result=result)
+
+        except ValidationError as ex:
+            return self.response_422(message=str(ex))
+        except ForbiddenError as ex:
+            return self.response_403(message=str(ex))
+        except SupersetException as ex:
+            return self.response_400(message=str(ex))
+        except Exception as ex:
+            logger.exception("Unexpected error in get_data")
+            return self.response_500(message="Internal server error")
+```
+
+### Global Error Handler
+```python
+@handle_api_exception
+def api_method(self):
+    """Decorator handles common exceptions automatically."""
+    # Business logic here
+    # Exceptions automatically converted to appropriate HTTP responses
+    pass
+```
+
+## Testing APIs
+
+### API Test Base Class
+```python
+from tests.integration_tests.base_tests import SupersetTestCase
+
+class TestChartApi(SupersetTestCase):
+    def setUp(self):
+        """Set up test environment."""
+        super().setUp()
+        self.login('admin')  # Login as admin user
+
+    def test_get_chart(self):
+        """Test getting chart via API."""
+        # Create test chart
+        chart = self.create_chart()
+
+        # Test API endpoint
+        response = self.client.get(f'/api/v1/chart/{chart.id}')
+
+        # Assertions
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['result']['slice_name'], chart.slice_name)
+
+    def test_create_chart(self):
+        """Test creating chart via API."""
+        chart_data = {
+            'slice_name': 'Test Chart',
+            'viz_type': 'table',
+            'datasource_id': 1
+        }
+
+        response = self.client.post('/api/v1/chart/', json=chart_data)
+
+        self.assertEqual(response.status_code, 201)
+        data = response.get_json()
+        self.assertIsNotNone(data['id'])
+
+    def test_unauthorized_access(self):
+        """Test unauthorized access returns 403."""
+        self.logout()  # Remove authentication
+
+        response = self.client.get('/api/v1/chart/1')
+        self.assertEqual(response.status_code, 401)
+```
+
+### API Integration Tests
+```python
+def test_chart_data_endpoint(self):
+    """Test chart data endpoint with various scenarios."""
+    chart = self.create_chart()
+
+    # Test valid request
+    query_context = {
+        'datasource': {'id': 1, 'type': 'table'},
+        'queries': [{'columns': ['name'], 'row_limit': 100}]
+    }
+
+    response = self.client.post(f'/api/v1/chart/{chart.id}/data',
+                               json=query_context)
+    self.assertEqual(response.status_code, 200)
+
+    # Test invalid request
+    response = self.client.post(f'/api/v1/chart/{chart.id}/data',
+                               json={})
+    self.assertEqual(response.status_code, 422)
+
+    # Test forbidden access
+    self.login('gamma_user')  # Login as limited user
+    response = self.client.post(f'/api/v1/chart/{chart.id}/data',
+                               json=query_context)
+    self.assertEqual(response.status_code, 403)
+```
+
+## API Documentation
+
+### OpenAPI/Swagger Integration
+APIs automatically generate OpenAPI documentation:
+
+```python
+class ChartRestApi(BaseSupersetModelRestApi):
+    """
+    Chart API
+    ---
+    This API provides CRUD operations for charts/visualizations.
+    """
+
+    @expose('/data', methods=['POST'])
+    @protect()
+    def get_data(self) -> Response:
+        """
+        Get chart data
+        ---
+        post:
+          summary: Execute chart query and return data
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    datasource:
+                      type: object
+                    queries:
+                      type: array
+          responses:
+            200:
+              description: Chart data
+            422:
+              description: Validation error
+        """
+        pass
+```
+
+## Best Practices
+
+### API Design Guidelines
+1. **Follow REST conventions** - Use appropriate HTTP methods and status codes
+2. **Use consistent naming** - snake_case for JSON fields, kebab-case for URLs
+3. **Validate all inputs** - Use schemas for request validation
+4. **Handle errors gracefully** - Return appropriate error codes and messages
+5. **Implement proper authentication** - Use security decorators consistently
+
+### Performance Optimization
+```python
+# Use pagination for large datasets
+@expose('/', methods=['GET'])
+@protect()
+def get_list(self) -> Response:
+    """Get paginated list of charts."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    result = ChartDAO.get_paginated(page=page, per_page=per_page)
+
+    return self.response(200, result={
+        'data': result.items,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': result.total,
+            'pages': result.pages
+        }
+    })
+
+# Cache expensive operations
+from superset.utils.cache import cache
+
+@cache.memoize(timeout=300)
+def get_expensive_data(self, chart_id: int) -> dict:
+    """Cache expensive chart data operations."""
+    return ChartDAO.get_expensive_data(chart_id)
+```
+
+### Security Best Practices
+1. **Always use @protect() decorator** - Enables authentication
+2. **Validate permissions explicitly** - Check user access to resources
+3. **Sanitize inputs** - Prevent SQL injection and XSS attacks
+4. **Log security events** - Track access attempts and failures
+5. **Use HTTPS in production** - Encrypt API communications

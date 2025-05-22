@@ -1,0 +1,567 @@
+# Database Layer
+
+Superset's database layer provides flexible data access through SQLAlchemy ORM, multiple database engine support, and sophisticated caching mechanisms.
+
+## Database Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│            Application Layer                │
+├─────────────────────────────────────────────┤
+│               DAO Layer                     │
+│        Data Access Objects                  │
+├─────────────────────────────────────────────┤
+│            SQLAlchemy ORM                   │
+│      Models, Relationships, Queries        │
+├─────────────────────────────────────────────┤
+│          Database Engine Specs             │
+│    Database-specific implementations        │
+├─────────────────────────────────────────────┤
+│            Database Drivers                 │
+│    PostgreSQL, MySQL, SQLite, etc.         │
+└─────────────────────────────────────────────┘
+```
+
+## Models & Relationships
+
+### Core Models
+Primary entities in Superset's data model:
+
+```python
+# Database connection model
+class Database(Model, AuditMixinNullable):
+    __tablename__ = 'dbs'
+
+    id = Column(Integer, primary_key=True)
+    database_name = Column(String(250), unique=True, nullable=False)
+    sqlalchemy_uri = Column(String(1024), nullable=False)
+    password = Column(EncryptedType(String(1024), secret_key))
+    impersonate_user = Column(Boolean, default=False)
+    extra = Column(Text)
+
+    # Relationships
+    tables = relationship('SqlaTable', back_populates='database')
+
+# Dataset/Table model
+class SqlaTable(Model, BaseDatasource):
+    __tablename__ = 'tables'
+
+    id = Column(Integer, primary_key=True)
+    table_name = Column(String(250), nullable=False)
+    schema = Column(String(255))
+    database_id = Column(Integer, ForeignKey('dbs.id'), nullable=False)
+    sql = Column(Text)
+
+    # Relationships
+    database = relationship('Database', back_populates='tables')
+    columns = relationship('TableColumn', back_populates='table')
+    metrics = relationship('SqlMetric', back_populates='table')
+
+# Chart/Visualization model
+class Slice(Model, AuditMixinNullable):
+    __tablename__ = 'slices'
+
+    id = Column(Integer, primary_key=True)
+    slice_name = Column(String(250), nullable=False)
+    datasource_id = Column(Integer, nullable=False)
+    datasource_type = Column(String(200))
+    viz_type = Column(String(250))
+    params = Column(Text)
+    query_context = Column(Text)
+
+    # Relationship to dataset
+    @property
+    def datasource(self) -> BaseDatasource:
+        return ConnectorRegistry.get_datasource(
+            self.datasource_type, self.datasource_id
+        )
+```
+
+### Model Mixins
+Common functionality through mixins:
+
+```python
+class AuditMixinNullable:
+    """Audit fields for tracking creation/modification."""
+    created_on = Column(DateTime, default=datetime.now)
+    changed_on = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_by_fk = Column(Integer, ForeignKey('ab_user.id'))
+    changed_by_fk = Column(Integer, ForeignKey('ab_user.id'))
+
+    created_by = relationship('User', foreign_keys=[created_by_fk])
+    changed_by = relationship('User', foreign_keys=[changed_by_fk])
+
+class ImportExportMixin:
+    """Export/import functionality for models."""
+    export_parent: str | None = None
+    export_children: list[str] = []
+
+    def export_to_dict(self) -> dict[str, Any]:
+        """Export model to dictionary."""
+        # Implementation details...
+        pass
+
+    @classmethod
+    def import_from_dict(cls, data: dict[str, Any]) -> 'ImportExportMixin':
+        """Create model from dictionary."""
+        # Implementation details...
+        pass
+```
+
+### Complex Relationships
+```python
+# Many-to-many relationship between dashboards and charts
+dashboard_slices = Table(
+    'dashboard_slices',
+    Column('id', Integer, primary_key=True),
+    Column('dashboard_id', Integer, ForeignKey('dashboards.id')),
+    Column('slice_id', Integer, ForeignKey('slices.id'))
+)
+
+class Dashboard(Model, AuditMixinNullable):
+    __tablename__ = 'dashboards'
+
+    # Many-to-many with charts
+    slices = relationship(
+        'Slice',
+        secondary=dashboard_slices,
+        back_populates='dashboards'
+    )
+
+    # Many-to-many with users (owners)
+    owners = relationship(
+        'User',
+        secondary=dashboard_user,
+        back_populates='dashboards'
+    )
+```
+
+## Database Engine Specs
+
+### Base Engine Spec
+Database-specific functionality is implemented through engine specifications:
+
+```python
+from superset.db_engine_specs.base import BaseEngineSpec
+
+class PostgresEngineSpec(BaseEngineSpec):
+    """PostgreSQL-specific implementations."""
+
+    engine = 'postgresql'
+    engine_name = 'PostgreSQL'
+
+    # SQL generation
+    @classmethod
+    def epoch_to_dttm(cls) -> str:
+        return "TIMESTAMP 'epoch' + {col} * INTERVAL '1 second'"
+
+    @classmethod
+    def get_table_names(
+        cls, database: Database, inspector: Inspector, schema: str | None
+    ) -> set[str]:
+        """Get list of table names."""
+        return set(inspector.get_table_names(schema))
+
+    # Connection testing
+    @classmethod
+    def test_connection(cls, connect_args: dict[str, Any]) -> None:
+        """Test database connection."""
+        engine = create_engine(connect_args['sqlalchemy_uri'])
+        try:
+            with engine.connect() as conn:
+                conn.execute(text('SELECT 1'))
+        except Exception as ex:
+            raise SupersetDBException(f"Connection failed: {ex}")
+
+    # Query optimization
+    @classmethod
+    def apply_limit_to_sql(
+        cls, sql: str, limit: int, database: Database
+    ) -> str:
+        """Apply LIMIT clause to SQL query."""
+        return f"{sql.rstrip(';')} LIMIT {limit}"
+```
+
+### Custom Engine Specs
+Adding support for new databases:
+
+```python
+class MyDatabaseEngineSpec(BaseEngineSpec):
+    """Custom database engine specification."""
+
+    engine = 'mydatabase'
+    engine_name = 'My Database'
+    default_driver = 'pymydatabase'
+
+    # Custom connection string format
+    @classmethod
+    def build_sqlalchemy_uri(
+        cls,
+        parameters: dict[str, Any],
+        encrypted_extra: dict[str, Any] | None = None
+    ) -> str:
+        """Build custom connection string."""
+        host = parameters.get('host', 'localhost')
+        port = parameters.get('port', 5432)
+        database = parameters.get('database', '')
+        username = parameters.get('username', '')
+        password = parameters.get('password', '')
+
+        return f"mydatabase://{username}:{password}@{host}:{port}/{database}"
+
+    # Custom SQL dialect support
+    @classmethod
+    def get_column_spec(
+        cls, native_type: str | None
+    ) -> dict[str, Any] | None:
+        """Map native types to SQLAlchemy types."""
+        type_map = {
+            'VARCHAR': String,
+            'INTEGER': Integer,
+            'TIMESTAMP': DateTime,
+            'BOOLEAN': Boolean
+        }
+        return {'type': type_map.get(native_type)}
+```
+
+## Data Access Objects (DAOs)
+
+### Base DAO Pattern
+```python
+from typing import TypeVar, Generic
+from superset.models.base import BaseModel
+
+T = TypeVar('T', bound=BaseModel)
+
+class BaseDAO(Generic[T]):
+    """Base Data Access Object."""
+
+    model_cls: type[T] | None = None
+    base_filter: BaseFilter | None = None
+
+    @classmethod
+    def find_by_id(cls, model_id: str | int) -> T | None:
+        """Find model by primary key."""
+        query = db.session.query(cls.model_cls)
+        if cls.base_filter:
+            query = cls.base_filter.apply(query, None)
+        return query.filter(cls.model_cls.id == model_id).one_or_none()
+
+    @classmethod
+    def find_all(cls) -> list[T]:
+        """Find all model instances."""
+        query = db.session.query(cls.model_cls)
+        if cls.base_filter:
+            query = cls.base_filter.apply(query, None)
+        return query.all()
+
+    @classmethod
+    def create(cls, properties: dict[str, Any], commit: bool = True) -> T:
+        """Create new model instance."""
+        instance = cls.model_cls(**properties)
+        db.session.add(instance)
+        if commit:
+            db.session.commit()
+        return instance
+
+    @classmethod
+    def update(
+        cls,
+        instance: T,
+        properties: dict[str, Any],
+        commit: bool = True
+    ) -> T:
+        """Update model instance."""
+        for key, value in properties.items():
+            if hasattr(instance, key):
+                setattr(instance, key, value)
+        if commit:
+            db.session.commit()
+        return instance
+
+    @classmethod
+    def delete(cls, instance: T, commit: bool = True) -> None:
+        """Delete model instance."""
+        db.session.delete(instance)
+        if commit:
+            db.session.commit()
+```
+
+### Specialized DAOs
+```python
+class ChartDAO(BaseDAO[Slice]):
+    """Chart-specific data access operations."""
+
+    model_cls = Slice
+
+    @classmethod
+    def find_by_datasource(cls, datasource_id: int) -> list[Slice]:
+        """Find charts using specific datasource."""
+        return db.session.query(Slice).filter(
+            Slice.datasource_id == datasource_id
+        ).all()
+
+    @classmethod
+    def get_chart_data(cls, chart_id: int, query_context: dict) -> dict:
+        """Execute chart query and return data."""
+        chart = cls.find_by_id(chart_id)
+        if not chart:
+            raise ValueError(f"Chart {chart_id} not found")
+
+        # Build and execute query
+        query_obj = QueryObject(**query_context)
+        df = chart.datasource.query(query_obj)
+
+        return {
+            'data': df.to_dict('records'),
+            'columns': list(df.columns),
+            'total_count': len(df)
+        }
+
+    @classmethod
+    def get_charts_changed_after(cls, timestamp: datetime) -> list[Slice]:
+        """Get charts modified after timestamp."""
+        return db.session.query(Slice).filter(
+            Slice.changed_on > timestamp
+        ).all()
+```
+
+## Database Migrations
+
+### Creating Migrations
+```bash
+# Create new migration
+superset db migrate -m "Add new table for feature X"
+
+# Migration file structure
+"""Add new table for feature X
+
+Revision ID: abc123
+Revises: def456
+Create Date: 2024-01-01 12:00:00.000000
+
+"""
+from alembic import op
+import sqlalchemy as sa
+
+def upgrade():
+    """Apply migration."""
+    op.create_table(
+        'new_table',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('name', sa.String(255), nullable=False),
+        sa.Column('created_on', sa.DateTime(), nullable=True),
+        sa.PrimaryKeyConstraint('id')
+    )
+
+def downgrade():
+    """Rollback migration."""
+    op.drop_table('new_table')
+```
+
+### Migration Best Practices
+```python
+# Good migration practices
+def upgrade():
+    # Use batch operations for large tables
+    with op.batch_alter_table('large_table') as batch_op:
+        batch_op.add_column(sa.Column('new_column', sa.String(255)))
+
+    # Add indexes separately
+    op.create_index('idx_large_table_new_column', 'large_table', ['new_column'])
+
+    # Handle data migration
+    connection = op.get_bind()
+    connection.execute(
+        text("UPDATE large_table SET new_column = 'default' WHERE new_column IS NULL")
+    )
+
+# Handle nullable constraints carefully
+def upgrade():
+    # Add column as nullable first
+    op.add_column('users', sa.Column('email', sa.String(255), nullable=True))
+
+    # Populate data
+    op.execute("UPDATE users SET email = username || '@example.com'")
+
+    # Make non-nullable
+    op.alter_column('users', 'email', nullable=False)
+```
+
+## Query Optimization
+
+### Efficient Queries
+```python
+# Use eager loading to avoid N+1 queries
+def get_charts_with_datasources() -> list[Slice]:
+    return db.session.query(Slice).options(
+        joinedload(Slice.datasource),
+        joinedload(Slice.created_by),
+        joinedload(Slice.changed_by)
+    ).all()
+
+# Use bulk operations for large datasets
+def bulk_update_charts(updates: list[dict]) -> None:
+    db.session.bulk_update_mappings(Slice, updates)
+    db.session.commit()
+
+# Optimize complex queries with subqueries
+def get_popular_charts() -> list[Slice]:
+    # Subquery to get chart usage counts
+    usage_subquery = db.session.query(
+        DashboardSlice.slice_id,
+        func.count(DashboardSlice.dashboard_id).label('usage_count')
+    ).group_by(DashboardSlice.slice_id).subquery()
+
+    # Main query with join
+    return db.session.query(Slice).join(
+        usage_subquery, Slice.id == usage_subquery.c.slice_id
+    ).filter(usage_subquery.c.usage_count > 5).all()
+```
+
+### Database Connection Management
+```python
+# Connection pooling configuration
+SQLALCHEMY_ENGINE_OPTIONS = {
+    'pool_size': 10,
+    'pool_recycle': 300,
+    'pool_pre_ping': True,
+    'max_overflow': 20
+}
+
+# Context manager for database transactions
+from contextlib import contextmanager
+
+@contextmanager
+def database_transaction():
+    """Context manager for database transactions."""
+    try:
+        db.session.begin()
+        yield db.session
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    finally:
+        db.session.close()
+
+# Usage
+with database_transaction() as session:
+    chart = session.query(Slice).get(1)
+    chart.slice_name = "Updated Name"
+    # Automatically committed on success, rolled back on exception
+```
+
+## Caching Strategies
+
+### Query Result Caching
+```python
+from superset.utils.cache import cache
+
+@cache.memoize(timeout=3600)
+def get_cached_chart_data(chart_id: int, query_hash: str) -> dict:
+    """Cache expensive chart data queries."""
+    chart = ChartDAO.find_by_id(chart_id)
+    return ChartDAO.get_chart_data(chart_id, chart.query_context)
+
+# Cache invalidation
+def invalidate_chart_cache(chart_id: int) -> None:
+    """Invalidate cached data for chart."""
+    # Find all cache keys for this chart
+    cache_keys = cache.get_many_by_prefix(f"chart_data_{chart_id}")
+    cache.delete_many(cache_keys)
+```
+
+### Metadata Caching
+```python
+class DatabaseDAO(BaseDAO[Database]):
+    @classmethod
+    @cache.memoize(timeout=600)
+    def get_table_metadata(cls, database_id: int, table_name: str) -> dict:
+        """Cache table metadata."""
+        database = cls.find_by_id(database_id)
+        inspector = database.get_inspector()
+
+        columns = inspector.get_columns(table_name)
+        indexes = inspector.get_indexes(table_name)
+
+        return {
+            'columns': columns,
+            'indexes': indexes,
+            'cached_at': datetime.utcnow().isoformat()
+        }
+```
+
+## Testing Database Layer
+
+### Model Testing
+```python
+class TestChartModel:
+    def test_create_chart(self):
+        """Test chart model creation."""
+        chart = Slice(
+            slice_name="Test Chart",
+            viz_type="table",
+            datasource_id=1,
+            datasource_type="table"
+        )
+        db.session.add(chart)
+        db.session.commit()
+
+        assert chart.id is not None
+        assert chart.slice_name == "Test Chart"
+
+    def test_chart_relationships(self):
+        """Test chart model relationships."""
+        dashboard = Dashboard(dashboard_title="Test Dashboard")
+        chart = Slice(slice_name="Test Chart")
+
+        dashboard.slices.append(chart)
+        db.session.add(dashboard)
+        db.session.commit()
+
+        assert chart in dashboard.slices
+        assert dashboard in chart.dashboards
+```
+
+### DAO Testing
+```python
+class TestChartDAO:
+    def test_find_by_datasource(self):
+        """Test finding charts by datasource."""
+        # Create test data
+        chart1 = Slice(slice_name="Chart 1", datasource_id=1)
+        chart2 = Slice(slice_name="Chart 2", datasource_id=1)
+        chart3 = Slice(slice_name="Chart 3", datasource_id=2)
+
+        db.session.add_all([chart1, chart2, chart3])
+        db.session.commit()
+
+        # Test DAO method
+        charts = ChartDAO.find_by_datasource(1)
+
+        assert len(charts) == 2
+        assert chart1 in charts
+        assert chart2 in charts
+        assert chart3 not in charts
+```
+
+## Best Practices
+
+### Database Design
+1. **Use appropriate indexes** - Index frequently queried columns
+2. **Normalize appropriately** - Balance normalization vs. query performance
+3. **Use constraints** - Enforce data integrity at database level
+4. **Plan for scale** - Consider partitioning for large tables
+
+### Model Design
+1. **Use mixins** - Share common functionality across models
+2. **Define relationships carefully** - Use appropriate relationship loading strategies
+3. **Implement __repr__** - Helpful for debugging
+4. **Use type hints** - Improve code clarity and tooling support
+
+### Query Optimization
+1. **Use eager loading** - Avoid N+1 query problems
+2. **Batch operations** - Use bulk operations for large datasets
+3. **Cache appropriately** - Cache expensive queries with proper invalidation
+4. **Profile queries** - Use EXPLAIN to understand query performance

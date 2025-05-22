@@ -7,20 +7,20 @@ echo "🔄 Restarting Apache Superset services..."
 stop_process() {
     local pattern="$1"
     local name="$2"
-    
+
     if pgrep -f "$pattern" > /dev/null 2>&1; then
         echo "⏹️  Stopping $name..."
         pkill -f "$pattern" || true
-        
+
         # Wait for graceful shutdown
         sleep 2
-        
+
         # Force kill if still running
         if pgrep -f "$pattern" > /dev/null 2>&1; then
             echo "🔨 Force stopping $name..."
             pkill -9 -f "$pattern" || true
         fi
-        
+
         echo "✅ $name stopped"
     else
         echo "⚠️  $name is not running"
@@ -62,10 +62,10 @@ start_service() {
     local name="$1"
     local command="$2"
     local logfile="/app/superset_home/logs/${name}.log"
-    
+
     # Create logs directory if it doesn't exist
     mkdir -p /app/superset_home/logs
-    
+
     if is_running "$command"; then
         echo "✅ $name is already running"
     else
@@ -134,12 +134,12 @@ echo "✅ Dependencies are ready!"
 cd /app
 
 # Activate virtual environment
-if [ -f "/app/venv/bin/activate" ]; then
-    . /app/venv/bin/activate
+if [ -f "/app/.venv/bin/activate" ]; then
+    . /app/.venv/bin/activate
 else
     echo "⚠️  Virtual environment not found, creating one..."
-    python3 -m venv /app/venv
-    . /app/venv/bin/activate
+    python3 -m .venv /app/.venv
+    . /app/.venv/bin/activate
     pip install --upgrade uv
     uv pip install -r requirements/development.txt
     uv pip install -e .
@@ -149,7 +149,7 @@ fi
 # Start Celery worker
 start_service "Celery Worker" "celery --app=superset.tasks.celery_app:app worker -O fair -l INFO --concurrency=2"
 
-# Start Celery beat scheduler  
+# Start Celery beat scheduler
 start_service "Celery Beat" "rm -f /tmp/celerybeat.pid && celery --app=superset.tasks.celery_app:app beat --pidfile /tmp/celerybeat.pid -l INFO -s /app/superset_home/celerybeat-schedule"
 
 # Start the websocket server
@@ -186,7 +186,7 @@ echo "🎉 All services have been restarted!"
 echo ""
 echo "🔧 Service Status:"
 echo "  - Backend:    http://localhost:8088 (Flask dev server with hot reload)"
-echo "  - Frontend:   http://localhost:9000 (Webpack dev server with hot reload)"  
+echo "  - Frontend:   http://localhost:9000 (Webpack dev server with hot reload)"
 echo "  - WebSocket:  http://localhost:8080"
 echo "  - PostgreSQL: localhost:5432"
 echo "  - Redis:      localhost:6379"

@@ -1,0 +1,509 @@
+# Command Pattern
+
+The Command pattern in Superset encapsulates business logic, validation, and orchestration in reusable, testable components.
+
+## Command Architecture
+
+Commands provide a clean separation between API endpoints and business logic:
+
+```
+┌─────────────────┐
+│   API Endpoint  │  ← Handles HTTP requests/responses
+├─────────────────┤
+│    Command      │  ← Encapsulates business logic
+├─────────────────┤
+│      DAO        │  ← Data access operations
+├─────────────────┤
+│     Model       │  ← Database entities
+└─────────────────┘
+```
+
+## Base Command Class
+
+### BaseCommand Interface
+```python
+from abc import ABC, abstractmethod
+from typing import Any
+
+class BaseCommand(ABC):
+    """Base class for all commands."""
+
+    @abstractmethod
+    def run(self) -> Any:
+        """Execute the command and return result."""
+        pass
+
+    @abstractmethod
+    def validate(self) -> None:
+        """Validate command prerequisites and data."""
+        pass
+```
+
+### Command Implementation Template
+```python
+from superset.commands.base import BaseCommand
+from superset.exceptions import ValidationError, ForbiddenError
+
+class CreateChartCommand(BaseCommand):
+    """Command to create a new chart."""
+
+    def __init__(self, actor: User, data: dict[str, Any]):
+        self._actor = actor
+        self._properties = data.copy()
+
+    def run(self) -> Slice:
+        """Create and return new chart."""
+        self.validate()
+
+        # Create chart
+        chart = ChartDAO.create(self._properties)
+
+        # Set permissions
+        security_manager.set_perm(self._actor, 'can_edit', chart)
+
+        return chart
+
+    def validate(self) -> None:
+        """Validate chart creation prerequisites."""
+        # Validate required fields
+        if not self._properties.get('slice_name'):
+            raise ValidationError('Chart name is required')
+
+        if not self._properties.get('viz_type'):
+            raise ValidationError('Visualization type is required')
+
+        # Validate datasource access
+        datasource_id = self._properties.get('datasource_id')
+        if datasource_id:
+            datasource = DatasetDAO.find_by_id(datasource_id)
+            if not datasource:
+                raise ValidationError('Invalid datasource')
+
+            if not security_manager.can_access_datasource(datasource):
+                raise ForbiddenError('Access denied to datasource')
+```
+
+## CRUD Commands
+
+### Create Commands
+```python
+class CreateDashboardCommand(BaseCommand):
+    """Create a new dashboard."""
+
+    def __init__(self, actor: User, data: dict[str, Any]):
+        self._actor = actor
+        self._properties = data.copy()
+
+    def run(self) -> Dashboard:
+        self.validate()
+
+        # Create dashboard
+        dashboard = DashboardDAO.create(self._properties)
+
+        # Set ownership
+        dashboard.owners = [self._actor]
+
+        # Create default permissions
+        security_manager.add_permission_to_role(
+            security_manager.find_role('Alpha'),
+            'can_read',
+            dashboard
+        )
+
+        return dashboard
+
+    def validate(self) -> None:
+        if not self._properties.get('dashboard_title'):
+            raise ValidationError('Dashboard title is required')
+
+        # Check for duplicate slug
+        slug = self._properties.get('slug')
+        if slug and DashboardDAO.find_by_slug(slug):
+            raise ValidationError('Dashboard with this slug already exists')
+```
+
+### Update Commands
+```python
+class UpdateChartCommand(BaseCommand):
+    """Update an existing chart."""
+
+    def __init__(self, actor: User, chart_id: int, data: dict[str, Any]):
+        self._actor = actor
+        self._chart_id = chart_id
+        self._properties = data.copy()
+
+    def run(self) -> Slice:
+        self.validate()
+
+        chart = ChartDAO.find_by_id(self._chart_id)
+
+        # Update properties
+        chart = ChartDAO.update(chart, self._properties)
+
+        # Update metadata
+        chart.changed_by = self._actor
+
+        return chart
+
+    def validate(self) -> None:
+        # Check chart exists
+        chart = ChartDAO.find_by_id(self._chart_id)
+        if not chart:
+            raise ValidationError('Chart not found')
+
+        # Check permissions
+        if not security_manager.can_edit_chart(chart):
+            raise ForbiddenError('Cannot edit this chart')
+
+        # Validate data
+        if 'slice_name' in self._properties and not self._properties['slice_name']:
+            raise ValidationError('Chart name cannot be empty')
+```
+
+### Delete Commands
+```python
+class DeleteChartCommand(BaseCommand):
+    """Delete a chart."""
+
+    def __init__(self, actor: User, chart_id: int):
+        self._actor = actor
+        self._chart_id = chart_id
+
+    def run(self) -> None:
+        self.validate()
+
+        chart = ChartDAO.find_by_id(self._chart_id)
+
+        # Remove from dashboards
+        for dashboard in chart.dashboards:
+            dashboard.slices.remove(chart)
+
+        # Delete chart
+        ChartDAO.delete(chart)
+
+    def validate(self) -> None:
+        chart = ChartDAO.find_by_id(self._chart_id)
+        if not chart:
+            raise ValidationError('Chart not found')
+
+        if not security_manager.can_delete_chart(chart):
+            raise ForbiddenError('Cannot delete this chart')
+```
+
+## Complex Business Logic Commands
+
+### Data Processing Commands
+```python
+class ChartDataCommand(BaseCommand):
+    """Execute chart query and return data."""
+
+    def __init__(self, chart: Slice, query_context: dict[str, Any]):
+        self._chart = chart
+        self._query_context = query_context
+
+    def run(self) -> dict[str, Any]:
+        self.validate()
+
+        # Build query
+        query_obj = self._build_query_object()
+
+        # Execute query
+        df = self._execute_query(query_obj)
+
+        # Process results
+        result = self._process_results(df)
+
+        # Cache results if needed
+        if self._should_cache():
+            self._cache_results(result)
+
+        return result
+
+    def validate(self) -> None:
+        # Check chart access
+        if not security_manager.can_access_chart(self._chart):
+            raise ForbiddenError('Access denied to chart')
+
+        # Validate query context
+        if not self._query_context.get('queries'):
+            raise ValidationError('Query context missing queries')
+
+        # Validate datasource access
+        datasource = self._chart.datasource
+        if not security_manager.can_access_datasource(datasource):
+            raise ForbiddenError('Access denied to datasource')
+
+    def _build_query_object(self) -> QueryObject:
+        """Build query object from context."""
+        # Implementation details...
+        pass
+
+    def _execute_query(self, query_obj: QueryObject) -> pd.DataFrame:
+        """Execute query and return DataFrame."""
+        # Implementation details...
+        pass
+```
+
+### Export/Import Commands
+```python
+class ExportDashboardCommand(BaseCommand):
+    """Export dashboard to JSON format."""
+
+    def __init__(self, dashboard_ids: list[int]):
+        self._dashboard_ids = dashboard_ids
+
+    def run(self) -> str:
+        self.validate()
+
+        dashboards = []
+        for dashboard_id in self._dashboard_ids:
+            dashboard = DashboardDAO.find_by_id(dashboard_id)
+            dashboards.append(self._serialize_dashboard(dashboard))
+
+        export_data = {
+            'version': '1.0',
+            'dashboards': dashboards,
+            'exported_at': datetime.utcnow().isoformat()
+        }
+
+        return json.dumps(export_data, indent=2)
+
+    def validate(self) -> None:
+        for dashboard_id in self._dashboard_ids:
+            dashboard = DashboardDAO.find_by_id(dashboard_id)
+            if not dashboard:
+                raise ValidationError(f'Dashboard {dashboard_id} not found')
+
+            if not security_manager.can_access_dashboard(dashboard):
+                raise ForbiddenError(f'Access denied to dashboard {dashboard_id}')
+
+    def _serialize_dashboard(self, dashboard: Dashboard) -> dict[str, Any]:
+        """Serialize dashboard to dictionary."""
+        return {
+            'id': dashboard.id,
+            'dashboard_title': dashboard.dashboard_title,
+            'slug': dashboard.slug,
+            'position_json': dashboard.position_json,
+            'css': dashboard.css,
+            'charts': [self._serialize_chart(chart) for chart in dashboard.slices]
+        }
+```
+
+### Validation Commands
+```python
+class ValidateDatasetCommand(BaseCommand):
+    """Validate dataset configuration."""
+
+    def __init__(self, dataset_id: int):
+        self._dataset_id = dataset_id
+
+    def run(self) -> dict[str, Any]:
+        self.validate()
+
+        dataset = DatasetDAO.find_by_id(self._dataset_id)
+        validation_results = {
+            'valid': True,
+            'errors': [],
+            'warnings': []
+        }
+
+        # Validate table exists
+        if not self._table_exists(dataset):
+            validation_results['valid'] = False
+            validation_results['errors'].append('Table does not exist')
+
+        # Validate columns
+        column_errors = self._validate_columns(dataset)
+        if column_errors:
+            validation_results['valid'] = False
+            validation_results['errors'].extend(column_errors)
+
+        # Validate metrics
+        metric_warnings = self._validate_metrics(dataset)
+        validation_results['warnings'].extend(metric_warnings)
+
+        return validation_results
+
+    def validate(self) -> None:
+        dataset = DatasetDAO.find_by_id(self._dataset_id)
+        if not dataset:
+            raise ValidationError('Dataset not found')
+
+        if not security_manager.can_access_dataset(dataset):
+            raise ForbiddenError('Access denied to dataset')
+```
+
+## Async Commands
+
+### Background Task Commands
+```python
+from superset.tasks.celery_app import celery_app
+
+class WarmUpCacheCommand(BaseCommand):
+    """Warm up cache for charts."""
+
+    def __init__(self, chart_ids: list[int]):
+        self._chart_ids = chart_ids
+
+    def run(self) -> str:
+        """Submit async task and return task ID."""
+        self.validate()
+
+        task = warm_up_cache_task.delay(self._chart_ids)
+        return task.id
+
+    def validate(self) -> None:
+        for chart_id in self._chart_ids:
+            chart = ChartDAO.find_by_id(chart_id)
+            if not chart:
+                raise ValidationError(f'Chart {chart_id} not found')
+
+@celery_app.task(bind=True)
+def warm_up_cache_task(self, chart_ids: list[int]) -> None:
+    """Celery task to warm up cache."""
+    for chart_id in chart_ids:
+        try:
+            chart = ChartDAO.find_by_id(chart_id)
+            if chart:
+                # Execute chart query to warm cache
+                command = ChartDataCommand(chart, chart.query_context)
+                command.run()
+        except Exception as ex:
+            logger.error(f"Error warming cache for chart {chart_id}: {ex}")
+```
+
+## Testing Commands
+
+### Command Test Template
+```python
+import pytest
+from superset.commands.chart.create import CreateChartCommand
+from superset.exceptions import ValidationError, ForbiddenError
+
+class TestCreateChartCommand:
+    def test_create_valid_chart(self):
+        """Test creating a valid chart."""
+        data = {
+            'slice_name': 'Test Chart',
+            'viz_type': 'table',
+            'datasource_id': 1
+        }
+
+        command = CreateChartCommand(self.admin_user, data)
+        result = command.run()
+
+        assert result.slice_name == 'Test Chart'
+        assert result.viz_type == 'table'
+        assert result.created_by == self.admin_user
+
+    def test_create_chart_missing_name(self):
+        """Test validation error for missing chart name."""
+        data = {
+            'viz_type': 'table',
+            'datasource_id': 1
+        }
+
+        command = CreateChartCommand(self.admin_user, data)
+
+        with pytest.raises(ValidationError, match='Chart name is required'):
+            command.run()
+
+    def test_create_chart_forbidden_datasource(self):
+        """Test forbidden error for restricted datasource."""
+        data = {
+            'slice_name': 'Test Chart',
+            'viz_type': 'table',
+            'datasource_id': 999  # Restricted datasource
+        }
+
+        command = CreateChartCommand(self.gamma_user, data)
+
+        with pytest.raises(ForbiddenError, match='Access denied to datasource'):
+            command.run()
+
+    def test_validation_only(self):
+        """Test command validation without execution."""
+        data = {
+            'slice_name': 'Test Chart',
+            'viz_type': 'table',
+            'datasource_id': 1
+        }
+
+        command = CreateChartCommand(self.admin_user, data)
+
+        # Should not raise exception
+        command.validate()
+
+    def test_invalid_validation(self):
+        """Test validation with invalid data."""
+        data = {}
+
+        command = CreateChartCommand(self.admin_user, data)
+
+        with pytest.raises(ValidationError):
+            command.validate()
+```
+
+### Mocking in Command Tests
+```python
+from unittest.mock import patch, Mock
+
+class TestChartDataCommand:
+    @patch('superset.commands.chart.data.ChartDAO')
+    @patch('superset.commands.chart.data.security_manager')
+    def test_chart_data_success(self, mock_security, mock_dao):
+        """Test successful chart data retrieval."""
+        # Setup mocks
+        mock_chart = Mock()
+        mock_chart.datasource = Mock()
+        mock_security.can_access_chart.return_value = True
+        mock_security.can_access_datasource.return_value = True
+
+        # Test command
+        command = ChartDataCommand(mock_chart, {'queries': [{}]})
+
+        # Mock should be called
+        mock_security.can_access_chart.assert_called_once_with(mock_chart)
+```
+
+## Best Practices
+
+### Command Design Guidelines
+1. **Single Responsibility** - Each command does one thing well
+2. **Validation First** - Always validate before executing
+3. **Error Handling** - Use specific exception types
+4. **Testability** - Design for easy unit testing
+5. **Immutable Data** - Don't modify input parameters
+
+### Command Organization
+```python
+# Group related commands in modules
+superset/commands/
+├── chart/
+│   ├── create.py
+│   ├── update.py
+│   ├── delete.py
+│   ├── data.py
+│   └── export.py
+├── dashboard/
+│   ├── create.py
+│   ├── update.py
+│   ├── copy.py
+│   └── export.py
+└── dataset/
+    ├── create.py
+    ├── refresh.py
+    └── validate.py
+```
+
+### Performance Considerations
+1. **Lazy Loading** - Load data only when needed
+2. **Caching** - Cache expensive operations
+3. **Async Tasks** - Use Celery for long-running operations
+4. **Batch Operations** - Process multiple items efficiently
+
+### Security Best Practices
+1. **Permission Checks** - Always validate user permissions
+2. **Input Validation** - Sanitize and validate all inputs
+3. **Audit Logging** - Log important operations
+4. **Rate Limiting** - Prevent abuse of expensive operations

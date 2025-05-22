@@ -1,0 +1,163 @@
+# Frontend Documentation
+
+Comprehensive documentation for the Apache Superset frontend React application. This guide covers architecture, development practices, testing, and utilities needed to work effectively with the codebase.
+
+## Documentation Overview
+
+### 🏗️ [Architecture](./architecture.mdx)
+- **Application Structure**: Layered React architecture with Redux state management
+- **Plugin System**: Extensible visualization framework with registry-based plugins
+- **Component Organization**: Design system approach with Atomic Design principles
+- **State Management**: Redux store structure and patterns
+- **Build System**: Modern Webpack 5 setup with TypeScript and optimization
+
+### 🧪 [Testing](./testing.mdx)
+- **Testing Strategy**: Multi-layer approach with unit, integration, and E2E tests
+- **Jest Configuration**: Component testing with React Testing Library
+- **Cypress E2E**: End-to-end testing for user workflows
+- **Testing Patterns**: Mocking, async testing, and best practices
+- **Coverage**: Code coverage setup and monitoring
+
+### 🧩 [Components](./components.mdx)
+- **Design System**: Atomic Design implementation with consistent patterns
+- **Component Structure**: Standard organization and file structure
+- **TypeScript Integration**: Strong typing for props and state
+- **Styling System**: Emotion-based CSS-in-JS with theme support
+- **Storybook**: Component development and documentation
+
+### 🔧 [Development](./development.mdx)
+- **Development Environment**: VS Code Dev Container setup with auto-service startup
+- **Hot Reload**: Fast development feedback with instant updates
+- **Code Quality**: ESLint, Prettier, and TypeScript integration
+- **Debugging**: Browser DevTools, source maps, and performance profiling
+- **Best Practices**: Code organization, performance, and maintenance
+
+### 🔌 [Plugins](./plugins.mdx)
+- **Plugin Architecture**: Registry-based system for custom visualizations
+- **Creating Plugins**: Step-by-step guide for chart plugin development
+- **Plugin Structure**: Standard directory layout and file organization
+- **Testing Plugins**: Component and integration testing strategies
+- **Best Practices**: Performance, accessibility, and maintainability
+
+### ⚡ [Utilities](./utilities.mdx)
+- **Build System**: Webpack configuration and optimization
+- **TypeScript**: Strict typing and path mapping setup
+- **Linting**: ESLint with custom rules for code quality
+- **Formatting**: Prettier and pre-commit hooks
+- **Development Tools**: Storybook, VS Code integration, and performance tools
+
+## Quick Start
+
+### Development Environment Setup
+
+1. **Open in Dev Container** (Recommended):
+   ```bash
+   # VS Code will prompt to reopen in container
+   # All services start automatically
+   # Frontend: http://localhost:9000
+   # Backend: http://localhost:8088
+   ```
+
+2. **Manual Setup**:
+   ```bash
+   cd superset-frontend
+   npm install
+   npm run dev-server
+   ```
+
+### Common Development Tasks
+
+**Running Tests:**
+```bash
+npm run test          # Run all tests
+npm run tdd           # Test-driven development mode
+npm run cover         # Generate coverage report
+```
+
+**Code Quality:**
+```bash
+npm run lint          # ESLint + TypeScript checking
+npm run lint-fix      # Auto-fix linting issues
+npm run format        # Format code with Prettier
+npm run type          # TypeScript type checking
+```
+
+**Building:**
+```bash
+npm run build         # Production build
+npm run build-dev     # Development build
+npm run bundle-stats  # Bundle size analysis
+```
+
+**Component Development:**
+```bash
+npm run storybook     # Start Storybook for component development
+```
+
+## Architecture Summary
+
+The Superset frontend is built as a **modern React application** with:
+
+- **Plugin-Driven Architecture**: Extensible visualization system
+- **Design System**: Consistent UI components based on Ant Design
+- **TypeScript**: Strict typing throughout the application
+- **Redux State Management**: Centralized state with domain-specific slices
+- **Modern Build System**: Webpack 5 with optimization and hot reload
+- **Comprehensive Testing**: Unit, integration, and E2E test coverage
+
+## Key Directories
+
+```
+superset-frontend/
+├── src/                    # Main application source
+│   ├── components/         # Design system components
+│   ├── features/          # Feature-specific modules
+│   ├── pages/             # Top-level page components
+│   ├── hooks/             # Custom React hooks
+│   ├── utils/             # Utility functions
+│   └── types/             # TypeScript definitions
+├── packages/              # Core framework packages
+│   ├── superset-ui-core/          # Plugin framework
+│   ├── superset-ui-chart-controls/ # Control panel framework
+│   └── superset-ui-switchboard/   # Communication framework
+├── plugins/               # Chart plugins
+│   ├── legacy-plugin-chart-*     # Legacy charts
+│   ├── plugin-chart-*           # Modern React charts
+│   └── legacy-preset-chart-*    # Chart collections
+├── spec/                  # Test fixtures and helpers
+├── cypress-base/          # End-to-end tests
+└── .storybook/           # Storybook configuration
+```
+
+## Development Standards
+
+### Component Development
+- Use TypeScript for all new components
+- Follow Atomic Design principles
+- Include Storybook stories for documentation
+- Write comprehensive unit tests
+- Follow accessibility best practices
+
+### Plugin Development
+- Extend the ChartPlugin base class
+- Implement proper TypeScript interfaces
+- Include control panel configuration
+- Add comprehensive tests
+- Follow performance best practices
+
+### Code Quality
+- ESLint configuration with custom rules
+- Prettier formatting with consistent style
+- Pre-commit hooks for automated quality checks
+- TypeScript strict mode enabled
+- Test coverage monitoring
+
+## Getting Help
+
+- **Architecture Questions**: Review the [Architecture](./architecture.mdx) guide
+- **Component Development**: See [Components](./components.mdx) documentation
+- **Testing Issues**: Check the [Testing](./testing.mdx) guide
+- **Plugin Development**: Follow the [Plugins](./plugins.mdx) guide
+- **Build Problems**: Consult [Utilities](./utilities.mdx) documentation
+
+This documentation provides everything needed to contribute effectively to the Superset frontend codebase with confidence and consistency.

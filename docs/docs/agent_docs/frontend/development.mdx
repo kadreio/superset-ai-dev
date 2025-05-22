@@ -1,0 +1,532 @@
+# Frontend Development Guide
+
+Complete guide for developing, building, and maintaining the Superset React frontend application.
+
+## Development Environment
+
+### Prerequisites
+
+**Node.js Requirements:**
+- Node.js: ^20.16.0
+- npm: ^10.8.1
+
+**System Requirements:**
+- 8GB+ RAM recommended for webpack builds
+- Modern browser for development testing
+- VS Code with recommended extensions
+
+### Quick Start
+
+The fastest way to start developing is using the **VS Code Dev Container**:
+
+```bash
+# 1. Open project in VS Code
+# 2. Reopen in container when prompted
+# 3. Services start automatically via postStartCommand:
+#    - Frontend dev server: http://localhost:9000
+#    - Backend API: http://localhost:8088
+#    - WebSocket: http://localhost:8080
+```
+
+**Manual Setup (Alternative):**
+```bash
+cd superset-frontend
+
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev-server
+
+# In another terminal, start backend
+cd ../
+make flask-app
+```
+
+### Development Scripts
+
+```json
+{
+  "dev": "webpack --mode=development --color --watch",
+  "dev-server": "webpack-dev-server --mode=development",
+  "build": "NODE_ENV=production webpack --mode=production",
+  "build-dev": "NODE_ENV=development webpack --mode=development",
+  "test": "jest --max-workers=80% --silent",
+  "tdd": "jest --watch",
+  "lint": "eslint . && npm run type",
+  "type": "tsc --noEmit",
+  "format": "prettier --write"
+}
+```
+
+## Development Workflow
+
+### Code Organization
+
+**Feature Development Structure:**
+```bash
+# 1. Create feature branch
+git checkout -b feature/my-feature
+
+# 2. Develop in appropriate directories
+src/features/my-feature/          # Feature-specific code
+src/components/MyComponent/       # Reusable components
+src/hooks/useMyFeature.ts         # Custom hooks
+
+# 3. Add tests
+*.test.tsx                        # Unit tests
+cypress/e2e/my-feature.test.ts    # E2E tests
+
+# 4. Document with stories
+*.stories.tsx                     # Storybook documentation
+```
+
+### Hot Reload Development
+
+The dev server provides instant feedback:
+
+```bash
+# Start dev server with hot reload
+npm run dev-server
+
+# Features:
+# - Instant component updates
+# - State preservation during edits
+# - Automatic error overlay
+# - Source map debugging
+```
+
+**Dev Server Configuration:**
+```javascript
+// webpack.config.js (dev mode)
+{
+  devServer: {
+    hot: true,
+    port: 9000,
+    host: 'localhost',
+    historyApiFallback: true,
+    proxy: {
+      '/api/*': 'http://localhost:8088',
+      '/static/appbuilder/*': 'http://localhost:8088'
+    }
+  }
+}
+```
+
+### Component Development
+
+**Component Development Cycle:**
+
+1. **Create Component Structure:**
+```bash
+mkdir src/components/MyComponent
+cd src/components/MyComponent
+
+# Create files
+touch index.tsx types.ts styles.tsx
+touch MyComponent.test.tsx MyComponent.stories.tsx
+```
+
+2. **Implement Component:**
+```typescript
+// index.tsx
+import React from 'react';
+import { MyComponentProps } from './types';
+import { StyledContainer } from './styles';
+
+const MyComponent: React.FC<MyComponentProps> = ({
+  title,
+  children,
+  onAction,
+  ...props
+}) => (
+  <StyledContainer {...props}>
+    <h2>{title}</h2>
+    {children}
+    <button onClick={onAction}>Action</button>
+  </StyledContainer>
+);
+
+export default MyComponent;
+```
+
+3. **Add Storybook Story:**
+```typescript
+// MyComponent.stories.tsx
+import type { Meta, StoryObj } from '@storybook/react';
+import MyComponent from './index';
+
+const meta: Meta<typeof MyComponent> = {
+  title: 'Components/MyComponent',
+  component: MyComponent,
+};
+
+export default meta;
+type Story = StoryObj<typeof MyComponent>;
+
+export const Default: Story = {
+  args: {
+    title: 'Default Component',
+    children: 'Component content'
+  }
+};
+```
+
+4. **Write Tests:**
+```typescript
+// MyComponent.test.tsx
+import { render, screen } from 'spec/helpers/testing-library';
+import MyComponent from './index';
+
+describe('MyComponent', () => {
+  it('renders title and children', () => {
+    render(
+      <MyComponent title="Test Title">
+        Test content
+      </MyComponent>
+    );
+
+    expect(screen.getByText('Test Title')).toBeInTheDocument();
+    expect(screen.getByText('Test content')).toBeInTheDocument();
+  });
+});
+```
+
+5. **Develop in Storybook:**
+```bash
+npm run storybook
+# Open http://localhost:6006
+```
+
+## Build System
+
+### Webpack Configuration
+
+**Development Build:**
+```bash
+# Fast development build with source maps
+npm run build-dev
+
+# Features:
+# - Fast incremental builds
+# - Source maps for debugging
+# - Hot module replacement
+# - Error overlay
+```
+
+**Production Build:**
+```bash
+# Optimized production bundle
+npm run build
+
+# Features:
+# - Code minification
+# - Tree shaking
+# - Bundle splitting
+# - Asset optimization
+```
+
+### Bundle Analysis
+
+**Analyze Bundle Size:**
+```bash
+# Generate bundle analysis
+npm run bundle-stats
+
+# Opens statistics.html with:
+# - Bundle composition
+# - Module dependencies
+# - Size analysis
+# - Optimization opportunities
+```
+
+**Key Optimization Features:**
+- **Code Splitting**: Route-based and component-based chunks
+- **Tree Shaking**: Removes unused code
+- **Minification**: Reduces bundle size
+- **Compression**: Gzip/Brotli compression
+
+### TypeScript Integration
+
+**Strict TypeScript Configuration:**
+```json
+{
+  "compilerOptions": {
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": true,
+    "target": "esnext",
+    "module": "esnext",
+    "jsx": "preserve"
+  }
+}
+```
+
+**Path Mapping for Imports:**
+```json
+{
+  "paths": {
+    "@superset-ui/core": ["./packages/superset-ui-core/src"],
+    "@superset-ui/chart-controls": ["./packages/superset-ui-chart-controls/src"],
+    "@superset-ui/plugin-chart-*": ["./plugins/plugin-chart-*/src"]
+  }
+}
+```
+
+## Code Quality
+
+### ESLint Configuration
+
+**Custom Rules for Superset:**
+```javascript
+// .eslintrc.js
+{
+  extends: [
+    'airbnb',
+    'prettier',
+    '@typescript-eslint/recommended'
+  ],
+  plugins: [
+    'i18n-strings',
+    'theme-colors',
+    'icons'
+  ],
+  rules: {
+    'i18n-strings/no-template-vars': 'error',
+    'theme-colors/no-hardcoded-colors': 'error',
+    'icons/no-fontawesome': 'warn'
+  }
+}
+```
+
+**Running Quality Checks:**
+```bash
+# Full linting and type checking
+npm run lint
+
+# Auto-fix issues
+npm run lint-fix
+
+# Type checking only
+npm run type
+
+# Format code
+npm run format
+```
+
+### Pre-commit Hooks
+
+**Automated Quality Checks:**
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint
+        entry: npm run lint
+        language: system
+        files: \.(js|jsx|ts|tsx)$
+
+      - id: prettier
+        name: Prettier
+        entry: npm run prettier-check
+        language: system
+        files: \.(js|jsx|ts|tsx)$
+```
+
+## Plugin Development
+
+### Creating Chart Plugins
+
+**Plugin Structure:**
+```bash
+plugins/plugin-chart-my-chart/
+├── src/
+│   ├── index.ts              # Plugin registration
+│   ├── MyChart.tsx           # Chart component
+│   ├── buildQuery.ts         # Query builder
+│   ├── controlPanel.tsx      # Configuration UI
+│   └── types.ts              # TypeScript definitions
+├── test/
+│   └── MyChart.test.tsx      # Plugin tests
+└── package.json              # Plugin metadata
+```
+
+**Basic Plugin Implementation:**
+```typescript
+// src/index.ts
+import { ChartPlugin } from '@superset-ui/core';
+import MyChart from './MyChart';
+import { MyChartProps } from './types';
+
+export default class MyChartPlugin extends ChartPlugin<MyChartProps> {
+  constructor() {
+    super({
+      metadata: {
+        name: 'My Chart',
+        description: 'Custom chart visualization',
+        thumbnail: './thumbnail.png'
+      },
+      Chart: MyChart,
+      buildQuery: buildQuery,
+      controlPanel: controlPanelConfig
+    });
+  }
+}
+```
+
+### Plugin Registration
+
+**Register in Main Preset:**
+```typescript
+// src/setup/setupPlugins.ts
+import MyChartPlugin from '../plugins/plugin-chart-my-chart';
+
+new Preset({
+  charts: [
+    new MyChartPlugin(),
+    // ... other plugins
+  ]
+}).register();
+```
+
+## Testing During Development
+
+### Test-Driven Development
+
+**TDD Workflow:**
+```bash
+# Start test watcher
+npm run tdd
+
+# Write failing test first
+# Implement feature to make test pass
+# Refactor and improve
+
+# Run specific test file
+npm test -- MyComponent.test.tsx
+
+# Run tests with pattern
+npm test -- --testNamePattern="renders correctly"
+```
+
+### Component Testing
+
+**Testing Strategy:**
+```typescript
+// Component test example
+describe('MyComponent', () => {
+  // Test rendering
+  it('renders with props', () => {
+    render(<MyComponent title="Test" />);
+    expect(screen.getByText('Test')).toBeInTheDocument();
+  });
+
+  // Test interactions
+  it('handles user interactions', async () => {
+    const user = userEvent.setup();
+    const handleClick = jest.fn();
+
+    render(<MyComponent onClick={handleClick} />);
+    await user.click(screen.getByRole('button'));
+
+    expect(handleClick).toHaveBeenCalled();
+  });
+
+  // Test edge cases
+  it('handles error states', () => {
+    render(<MyComponent error="Something went wrong" />);
+    expect(screen.getByText(/error/i)).toBeInTheDocument();
+  });
+});
+```
+
+## Debugging
+
+### Development Tools
+
+**Browser DevTools:**
+- React Developer Tools extension
+- Redux DevTools extension
+- Performance profiling
+- Network tab for API calls
+
+**Source Maps:**
+```javascript
+// webpack.config.js (development)
+{
+  devtool: 'eval-source-map',  // Fast rebuilds
+  // or 'source-map' for debugging
+}
+```
+
+**Debug Configuration:**
+```json
+// .vscode/launch.json
+{
+  "type": "chrome",
+  "request": "launch",
+  "name": "Debug Frontend",
+  "url": "http://localhost:9000",
+  "webRoot": "${workspaceFolder}/superset-frontend/src",
+  "sourceMapPathOverrides": {
+    "webpack:///src/*": "${webRoot}/*"
+  }
+}
+```
+
+### Performance Debugging
+
+**Bundle Analysis:**
+```bash
+# Detailed bundle analysis
+BUNDLE_ANALYZER=true npm run build
+```
+
+**Performance Profiling:**
+```typescript
+// React Profiler for performance measurement
+import { Profiler } from 'react';
+
+const onRenderCallback = (id, phase, actualDuration) => {
+  console.log('Render performance:', { id, phase, actualDuration });
+};
+
+<Profiler id="MyComponent" onRender={onRenderCallback}>
+  <MyComponent />
+</Profiler>
+```
+
+## Best Practices
+
+### Code Organization
+
+1. **Feature-based Structure**: Group related files together
+2. **Consistent Imports**: Use path mapping for clean imports
+3. **Component Composition**: Prefer composition over inheritance
+4. **Custom Hooks**: Extract reusable logic into hooks
+
+### Performance
+
+1. **Code Splitting**: Lazy load routes and heavy components
+2. **Memoization**: Use React.memo and useMemo appropriately
+3. **Bundle Optimization**: Monitor and optimize bundle size
+4. **Image Optimization**: Use appropriate formats and sizes
+
+### Accessibility
+
+1. **Semantic HTML**: Use proper HTML elements
+2. **ARIA Labels**: Provide accessible descriptions
+3. **Keyboard Navigation**: Support keyboard interactions
+4. **Screen Readers**: Test with assistive technologies
+
+### Maintenance
+
+1. **Regular Updates**: Keep dependencies updated
+2. **Performance Monitoring**: Watch bundle size and render times
+3. **Code Reviews**: Follow established patterns
+4. **Documentation**: Maintain Storybook stories and docs
+
+This development guide provides the foundation for efficient, high-quality frontend development in the Superset ecosystem.

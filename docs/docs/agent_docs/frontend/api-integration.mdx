@@ -1,0 +1,867 @@
+# API Integration Guide
+
+Comprehensive guide to frontend-backend communication, data flow, authentication, and API client patterns in Superset.
+
+## API Client Architecture
+
+### SupersetClient Configuration
+
+**Core API Client (`@superset-ui/core`):**
+```typescript
+import { SupersetClient } from '@superset-ui/core';
+
+// Client configuration
+SupersetClient.configure({
+  protocol: 'http',
+  host: 'localhost',
+  port: '8088',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  credentials: 'same-origin',
+  csrfToken: () => getCSRFToken(),
+});
+
+// CSRF token handling
+const getCSRFToken = (): string => {
+  const token = document.querySelector('input[name="csrf_token"]')?.getAttribute('value');
+  return token || '';
+};
+```
+
+**Request Methods:**
+```typescript
+// GET request
+const response = await SupersetClient.get({
+  endpoint: '/api/v1/chart/123',
+  headers: { 'Accept': 'application/json' },
+});
+
+// POST request with body
+const createResponse = await SupersetClient.post({
+  endpoint: '/api/v1/chart/',
+  body: JSON.stringify({
+    slice_name: 'New Chart',
+    viz_type: 'table',
+    datasource_id: 1,
+  }),
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// PUT request for updates
+const updateResponse = await SupersetClient.put({
+  endpoint: '/api/v1/chart/123',
+  body: JSON.stringify({ slice_name: 'Updated Chart' }),
+});
+
+// DELETE request
+await SupersetClient.delete({
+  endpoint: '/api/v1/chart/123',
+});
+```
+
+### Authentication Flow
+
+**Token-Based Authentication:**
+```typescript
+// Authentication state management
+interface AuthState {
+  isAuthenticated: boolean;
+  token: string | null;
+  user: User | null;
+  guestToken?: string;
+  refreshToken?: string;
+}
+
+// Login flow
+export const login = createAsyncThunk(
+  'auth/login',
+  async ({ username, password }: LoginCredentials) => {
+    const response = await SupersetClient.post({
+      endpoint: '/api/v1/security/login',
+      body: JSON.stringify({ username, password }),
+    });
+
+    const { access_token, refresh_token, user } = response.json;
+
+    // Store tokens
+    localStorage.setItem('access_token', access_token);
+    localStorage.setItem('refresh_token', refresh_token);
+
+    // Configure client with token
+    SupersetClient.configure({
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+      },
+    });
+
+    return { token: access_token, user };
+  }
+);
+
+// Token refresh
+export const refreshAuthToken = createAsyncThunk(
+  'auth/refresh',
+  async (_, { getState, rejectWithValue }) => {
+    const refreshToken = localStorage.getItem('refresh_token');
+
+    if (!refreshToken) {
+      return rejectWithValue('No refresh token available');
+    }
+
+    try {
+      const response = await SupersetClient.post({
+        endpoint: '/api/v1/security/refresh',
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+
+      const { access_token } = response.json;
+      localStorage.setItem('access_token', access_token);
+
+      return { token: access_token };
+    } catch (error) {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      throw error;
+    }
+  }
+);
+```
+
+**Guest Token for Embedded Dashboards:**
+```typescript
+// Guest token management for embedding
+interface GuestTokenParams {
+  resources: Array<{
+    type: 'dashboard' | 'chart';
+    id: string;
+  }>;
+  rls: Array<{
+    clause: string;
+  }>;
+  user: {
+    username: string;
+    first_name: string;
+    last_name: string;
+  };
+}
+
+export const fetchGuestToken = async (params: GuestTokenParams): Promise<string> => {
+  const response = await SupersetClient.post({
+    endpoint: '/api/v1/security/guest_token/',
+    body: JSON.stringify(params),
+  });
+
+  return response.json.token;
+};
+
+// Guest token refresh mechanism
+let tokenRefreshTimeout: NodeJS.Timeout;
+
+export const scheduleTokenRefresh = (token: string, expiresIn: number) => {
+  // Refresh token 5 minutes before expiry
+  const refreshTime = (expiresIn - 300) * 1000;
+
+  tokenRefreshTimeout = setTimeout(async () => {
+    try {
+      const newToken = await refreshGuestToken(token);
+      SupersetClient.configure({
+        headers: { Authorization: `Bearer ${newToken}` },
+      });
+
+      // Schedule next refresh
+      scheduleTokenRefresh(newToken, expiresIn);
+    } catch (error) {
+      console.error('Token refresh failed:', error);
+    }
+  }, refreshTime);
+};
+```
+
+## Data Flow Patterns
+
+### Chart Data Pipeline
+
+**Query Context System:**
+```typescript
+// Query context building
+interface QueryContext {
+  datasource: DatasourceInfo;
+  queries: Query[];
+  form_data: QueryFormData;
+  result_format: 'json' | 'csv';
+  result_type: 'full' | 'query' | 'results' | 'samples';
+}
+
+// Build query from form data
+export const buildQueryContext = (
+  formData: QueryFormData,
+  options: Partial<QueryContext> = {}
+): QueryContext => {
+  const {
+    datasource,
+    viz_type,
+    metrics = [],
+    groupby = [],
+    columns = [],
+    time_range,
+    granularity_sqla,
+    filters = [],
+    ...rest
+  } = formData;
+
+  const query: Query = {
+    time_range,
+    granularity: granularity_sqla,
+    metrics: metrics.map(metric =>
+      typeof metric === 'string' ? metric : metric.label
+    ),
+    groupby,
+    columns,
+    filters: filters.map(filter => ({
+      col: filter.col,
+      op: filter.op,
+      val: filter.val,
+    })),
+    extras: {
+      having: rest.having || '',
+      where: rest.where || '',
+      time_grain_sqla: rest.time_grain_sqla,
+    },
+  };
+
+  return {
+    datasource: parseDatasource(datasource),
+    queries: [query],
+    form_data: formData,
+    result_format: 'json',
+    result_type: 'full',
+    ...options,
+  };
+};
+
+// Chart data fetching
+export const fetchChartData = async (
+  queryContext: QueryContext
+): Promise<ChartDataResponse> => {
+  const response = await SupersetClient.post({
+    endpoint: '/api/v1/chart/data',
+    body: JSON.stringify(queryContext),
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  return response.json;
+};
+```
+
+**Data Transformation Pipeline:**
+```typescript
+// Transform raw API data to chart props
+export const transformChartData = (
+  chartProps: ChartProps,
+  queryData: QueryData[]
+): TransformedChartProps => {
+  const { formData, width, height } = chartProps;
+  const [firstQuery] = queryData;
+
+  if (!firstQuery?.data?.length) {
+    return {
+      ...chartProps,
+      data: [],
+      isEmpty: true,
+    };
+  }
+
+  // Apply data transformations based on chart type
+  switch (formData.viz_type) {
+    case 'table':
+      return transformTableData(chartProps, firstQuery);
+    case 'bar':
+      return transformBarChartData(chartProps, firstQuery);
+    case 'line':
+      return transformTimeSeriesData(chartProps, firstQuery);
+    default:
+      return {
+        ...chartProps,
+        data: firstQuery.data,
+      };
+  }
+};
+
+// Table-specific transformation
+const transformTableData = (
+  chartProps: ChartProps,
+  queryData: QueryData
+): TableChartProps => {
+  const { formData } = chartProps;
+  const { data, colnames, coltypes } = queryData;
+
+  // Build column definitions
+  const columns = colnames.map((name, index) => ({
+    accessor: name,
+    Header: name,
+    type: coltypes[index],
+    sortable: true,
+    filterable: formData.table_filter,
+  }));
+
+  // Process row data
+  const processedData = data.map(row =>
+    colnames.reduce((acc, col, index) => {
+      acc[col] = formatValue(row[index], coltypes[index]);
+      return acc;
+    }, {} as Record<string, any>)
+  );
+
+  return {
+    ...chartProps,
+    data: processedData,
+    columns,
+    totalCount: queryData.rowcount,
+  };
+};
+```
+
+### Dashboard API Integration
+
+**Dashboard Loading Pipeline:**
+```typescript
+// Dashboard data fetching
+export const fetchDashboard = createAsyncThunk(
+  'dashboard/fetch',
+  async (dashboardId: string) => {
+    // Fetch dashboard metadata
+    const dashboardResponse = await SupersetClient.get({
+      endpoint: `/api/v1/dashboard/${dashboardId}`,
+    });
+
+    const dashboard = dashboardResponse.json.result;
+
+    // Fetch charts data in parallel
+    const chartIds = extractChartIds(dashboard.position_json);
+    const chartPromises = chartIds.map(chartId =>
+      SupersetClient.get({
+        endpoint: `/api/v1/chart/${chartId}`,
+      })
+    );
+
+    const chartResponses = await Promise.all(chartPromises);
+    const charts = chartResponses.map(response => response.json.result);
+
+    // Fetch datasets for the dashboard
+    const datasetIds = [...new Set(charts.map(chart => chart.datasource_id))];
+    const datasetPromises = datasetIds.map(datasetId =>
+      SupersetClient.get({
+        endpoint: `/api/v1/dataset/${datasetId}`,
+      })
+    );
+
+    const datasetResponses = await Promise.all(datasetPromises);
+    const datasets = datasetResponses.map(response => response.json.result);
+
+    return {
+      dashboard,
+      charts,
+      datasets,
+    };
+  }
+);
+
+// Dashboard charts data refresh
+export const refreshDashboardCharts = createAsyncThunk(
+  'dashboard/refreshCharts',
+  async ({
+    chartIds,
+    filters = [],
+    force = false
+  }: {
+    chartIds: string[];
+    filters?: Filter[];
+    force?: boolean;
+  }) => {
+    const chartDataPromises = chartIds.map(async chartId => {
+      const chart = await SupersetClient.get({
+        endpoint: `/api/v1/chart/${chartId}`,
+      });
+
+      const formData = {
+        ...chart.json.result.params,
+        extra_filters: filters,
+      };
+
+      const queryContext = buildQueryContext(formData);
+      const chartData = await fetchChartData(queryContext);
+
+      return {
+        chartId,
+        data: chartData,
+      };
+    });
+
+    return Promise.all(chartDataPromises);
+  }
+);
+```
+
+## Caching Strategies
+
+### Query Result Caching
+
+**Frontend Cache Implementation:**
+```typescript
+// Query cache manager
+class QueryCacheManager {
+  private cache = new Map<string, CacheEntry>();
+  private readonly maxSize = 100;
+  private readonly ttl = 5 * 60 * 1000; // 5 minutes
+
+  generateKey(queryContext: QueryContext): string {
+    const { datasource, queries, form_data } = queryContext;
+    const keyData = {
+      datasource: datasource.id,
+      query: queries[0],
+      filters: form_data.extra_filters || [],
+    };
+    return btoa(JSON.stringify(keyData));
+  }
+
+  get(key: string): ChartDataResponse | null {
+    const entry = this.cache.get(key);
+
+    if (!entry) return null;
+
+    // Check TTL
+    if (Date.now() - entry.timestamp > this.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return entry.data;
+  }
+
+  set(key: string, data: ChartDataResponse): void {
+    // Implement LRU eviction
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+    });
+  }
+
+  invalidate(pattern?: string): void {
+    if (!pattern) {
+      this.cache.clear();
+      return;
+    }
+
+    // Invalidate matching keys
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+}
+
+// Usage in chart data fetching
+const queryCache = new QueryCacheManager();
+
+export const fetchChartDataWithCache = async (
+  queryContext: QueryContext,
+  force = false
+): Promise<ChartDataResponse> => {
+  const cacheKey = queryCache.generateKey(queryContext);
+
+  if (!force) {
+    const cachedData = queryCache.get(cacheKey);
+    if (cachedData) {
+      return cachedData;
+    }
+  }
+
+  const data = await fetchChartData(queryContext);
+  queryCache.set(cacheKey, data);
+
+  return data;
+};
+```
+
+### Metadata Caching
+
+**Dataset and Database Metadata:**
+```typescript
+// Metadata cache with RTK Query
+export const metadataApi = createApi({
+  reducerPath: 'metadataApi',
+  baseQuery: fetchBaseQuery({
+    baseUrl: '/api/v1/',
+    prepareHeaders: (headers, { getState }) => {
+      const token = (getState() as RootState).auth.token;
+      if (token) {
+        headers.set('authorization', `Bearer ${token}`);
+      }
+      return headers;
+    },
+  }),
+
+  tagTypes: ['Dataset', 'Database', 'Table', 'Column'],
+
+  endpoints: (builder) => ({
+    getDatabase: builder.query<Database, number>({
+      query: (id) => `database/${id}`,
+      providesTags: (result, error, id) => [{ type: 'Database', id }],
+      // Cache for 10 minutes
+      keepUnusedDataFor: 600,
+    }),
+
+    getDatabaseTables: builder.query<Table[], number>({
+      query: (databaseId) => `database/${databaseId}/tables/`,
+      providesTags: (result, error, databaseId) => [
+        { type: 'Table', id: 'LIST' },
+        { type: 'Database', id: databaseId },
+      ],
+      keepUnusedDataFor: 300, // 5 minutes
+    }),
+
+    getTableColumns: builder.query<Column[], { databaseId: number; tableName: string }>({
+      query: ({ databaseId, tableName }) =>
+        `database/${databaseId}/table/${tableName}/columns/`,
+      providesTags: (result, error, { databaseId, tableName }) => [
+        { type: 'Column', id: `${databaseId}-${tableName}` },
+      ],
+      keepUnusedDataFor: 600,
+    }),
+
+    getDataset: builder.query<Dataset, number>({
+      query: (id) => `dataset/${id}`,
+      providesTags: (result, error, id) => [{ type: 'Dataset', id }],
+      keepUnusedDataFor: 300,
+    }),
+  }),
+});
+
+export const {
+  useGetDatabaseQuery,
+  useGetDatabaseTablesQuery,
+  useGetTableColumnsQuery,
+  useGetDatasetQuery,
+} = metadataApi;
+```
+
+## Error Handling
+
+### Comprehensive Error Management
+
+**Error Types and Handling:**
+```typescript
+// API Error types
+interface APIError {
+  message: string;
+  error_type: 'GENERIC_DB_ENGINE_ERROR' | 'QUERY_TIMEOUT' | 'PERMISSION_DENIED';
+  level: 'error' | 'warning' | 'info';
+  extra?: {
+    sql?: string;
+    engine_name?: string;
+    issue_codes?: Array<{
+      code: number;
+      message: string;
+    }>;
+  };
+}
+
+// Error handling middleware
+const errorHandlingMiddleware: Middleware = (store) => (next) => (action) => {
+  const result = next(action);
+
+  // Handle rejected async thunks
+  if (action.type.endsWith('/rejected')) {
+    const error = action.payload || action.error;
+
+    if (error.status === 401) {
+      // Handle authentication errors
+      store.dispatch(logout());
+      window.location.href = '/login';
+      return result;
+    }
+
+    if (error.status === 403) {
+      // Handle permission errors
+      store.dispatch(addDangerToast({
+        text: 'You do not have permission to perform this action',
+      }));
+      return result;
+    }
+
+    // Handle API errors
+    if (error.message) {
+      store.dispatch(addDangerToast({
+        text: error.message,
+      }));
+    }
+  }
+
+  return result;
+};
+
+// Chart-specific error handling
+export const handleChartError = (
+  error: APIError,
+  chartId: string
+): ChartErrorAction => {
+  // Log error for debugging
+  console.error(`Chart ${chartId} error:`, error);
+
+  // Determine error message based on type
+  let userMessage = error.message;
+
+  switch (error.error_type) {
+    case 'QUERY_TIMEOUT':
+      userMessage = 'Query timed out. Please try a more specific filter or contact your administrator.';
+      break;
+    case 'PERMISSION_DENIED':
+      userMessage = 'You do not have permission to access this data.';
+      break;
+    case 'GENERIC_DB_ENGINE_ERROR':
+      userMessage = `Database error: ${error.message}`;
+      break;
+  }
+
+  return {
+    type: 'CHART_UPDATE_FAILURE',
+    chartId,
+    error: userMessage,
+    stackTrace: error.extra?.sql,
+  };
+};
+```
+
+### Retry Logic
+
+**Automatic Retry for Failed Requests:**
+```typescript
+// Retry configuration
+interface RetryConfig {
+  maxAttempts: number;
+  backoffMultiplier: number;
+  initialDelay: number;
+}
+
+const defaultRetryConfig: RetryConfig = {
+  maxAttempts: 3,
+  backoffMultiplier: 2,
+  initialDelay: 1000,
+};
+
+// Retry wrapper for API calls
+export const withRetry = async <T>(
+  apiCall: () => Promise<T>,
+  config: Partial<RetryConfig> = {}
+): Promise<T> => {
+  const { maxAttempts, backoffMultiplier, initialDelay } = {
+    ...defaultRetryConfig,
+    ...config,
+  };
+
+  let lastError: Error;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await apiCall();
+    } catch (error) {
+      lastError = error as Error;
+
+      // Don't retry on authentication or permission errors
+      if (error.status === 401 || error.status === 403) {
+        throw error;
+      }
+
+      // Don't retry on final attempt
+      if (attempt === maxAttempts) {
+        break;
+      }
+
+      // Calculate delay with exponential backoff
+      const delay = initialDelay * Math.pow(backoffMultiplier, attempt - 1);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError!;
+};
+
+// Usage with chart data fetching
+export const fetchChartDataWithRetry = (queryContext: QueryContext) =>
+  withRetry(
+    () => fetchChartData(queryContext),
+    { maxAttempts: 2, initialDelay: 500 }
+  );
+```
+
+## Real-time Features
+
+### WebSocket Integration
+
+**WebSocket Communication:**
+```typescript
+// WebSocket client for real-time updates
+class SupersetWebSocket {
+  private ws: WebSocket | null = null;
+  private eventListeners = new Map<string, Function[]>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+
+  connect(url: string): void {
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      console.log('WebSocket connected');
+      this.reconnectAttempts = 0;
+    };
+
+    this.ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      this.handleMessage(message);
+    };
+
+    this.ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      this.attemptReconnect(url);
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+  }
+
+  private handleMessage(message: any): void {
+    const { type, data } = message;
+    const listeners = this.eventListeners.get(type) || [];
+
+    listeners.forEach(listener => listener(data));
+  }
+
+  subscribe(eventType: string, callback: Function): void {
+    if (!this.eventListeners.has(eventType)) {
+      this.eventListeners.set(eventType, []);
+    }
+    this.eventListeners.get(eventType)!.push(callback);
+  }
+
+  unsubscribe(eventType: string, callback: Function): void {
+    const listeners = this.eventListeners.get(eventType) || [];
+    const index = listeners.indexOf(callback);
+    if (index > -1) {
+      listeners.splice(index, 1);
+    }
+  }
+
+  send(message: any): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private attemptReconnect(url: string): void {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      setTimeout(() => {
+        this.reconnectAttempts++;
+        this.connect(url);
+      }, 1000 * Math.pow(2, this.reconnectAttempts));
+    }
+  }
+}
+
+// Usage in dashboard for real-time updates
+const Dashboard: React.FC = () => {
+  const dispatch = useAppDispatch();
+  const websocket = useRef(new SupersetWebSocket());
+
+  useEffect(() => {
+    const ws = websocket.current;
+    ws.connect('ws://localhost:8080/ws/dashboard');
+
+    // Subscribe to chart updates
+    ws.subscribe('chart_update', (data: any) => {
+      dispatch(updateChartData({
+        chartId: data.chart_id,
+        data: data.chart_data,
+      }));
+    });
+
+    // Subscribe to filter changes
+    ws.subscribe('filter_update', (data: any) => {
+      dispatch(applyDashboardFilter(data));
+    });
+
+    return () => {
+      ws.disconnect();
+    };
+  }, [dispatch]);
+
+  // Component render logic
+};
+```
+
+## Performance Optimization
+
+### Request Optimization
+
+**Batch API Requests:**
+```typescript
+// Batch multiple chart requests
+export const fetchMultipleCharts = createAsyncThunk(
+  'charts/fetchMultiple',
+  async (chartIds: string[]) => {
+    // Batch requests to reduce network overhead
+    const batchSize = 10;
+    const batches = [];
+
+    for (let i = 0; i < chartIds.length; i += batchSize) {
+      const batch = chartIds.slice(i, i + batchSize);
+      batches.push(batch);
+    }
+
+    const results = await Promise.allSettled(
+      batches.map(async batch => {
+        const response = await SupersetClient.post({
+          endpoint: '/api/v1/chart/data/batch',
+          body: JSON.stringify({
+            chart_ids: batch,
+          }),
+        });
+        return response.json;
+      })
+    );
+
+    // Flatten and return results
+    return results
+      .filter(result => result.status === 'fulfilled')
+      .flatMap(result => result.value);
+  }
+);
+
+// Request deduplication
+const pendingRequests = new Map<string, Promise<any>>();
+
+export const deduplicatedRequest = <T>(
+  key: string,
+  requestFn: () => Promise<T>
+): Promise<T> => {
+  if (pendingRequests.has(key)) {
+    return pendingRequests.get(key)!;
+  }
+
+  const request = requestFn().finally(() => {
+    pendingRequests.delete(key);
+  });
+
+  pendingRequests.set(key, request);
+  return request;
+};
+```
+
+This comprehensive API integration system provides robust, performant communication between the frontend and backend while handling authentication, caching, error scenarios, and real-time updates effectively.

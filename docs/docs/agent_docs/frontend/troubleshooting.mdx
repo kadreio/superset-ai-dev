@@ -1,0 +1,668 @@
+# Troubleshooting Guide
+
+Comprehensive troubleshooting guide for common issues in Superset frontend development, including build problems, runtime errors, performance issues, and debugging strategies.
+
+## Common Build Issues
+
+### Node.js and npm Problems
+
+**Node Version Conflicts:**
+```bash
+# Error: Node version compatibility issues
+Error: The engine "node" is incompatible with this module
+
+# Solution: Use correct Node version
+nvm use 20.16.0
+npm install
+
+# Verify versions
+node --version  # Should be v20.16.0
+npm --version   # Should be v10.8.1+
+```
+
+**npm Install Failures:**
+```bash
+# Error: Package installation failures
+npm ERR! peer dep missing: react@^17.0.0
+
+# Solution: Clear cache and reinstall
+rm -rf node_modules package-lock.json
+npm cache clean --force
+npm install
+
+# Alternative: Use npm ci for clean install
+npm ci
+```
+
+**Memory Issues During Build:**
+```bash
+# Error: JavaScript heap out of memory
+FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed
+
+# Solution: Increase Node memory limit
+export NODE_OPTIONS="--max_old_space_size=8192"
+npm run build
+
+# Or set in package.json
+"scripts": {
+  "build": "cross-env NODE_OPTIONS=--max_old_space_size=8192 webpack --mode=production"
+}
+```
+
+### Webpack Build Problems
+
+**Module Resolution Errors:**
+```bash
+# Error: Cannot resolve module
+Module not found: Error: Can't resolve '@superset-ui/core'
+
+# Solution: Check tsconfig.json paths
+{
+  "compilerOptions": {
+    "paths": {
+      "@superset-ui/core": ["./packages/superset-ui-core/src"],
+      "@superset-ui/chart-controls": ["./packages/superset-ui-chart-controls/src"]
+    }
+  }
+}
+
+# Verify webpack alias configuration
+resolve: {
+  alias: {
+    '@superset-ui/core': path.resolve('./packages/superset-ui-core/src'),
+  }
+}
+```
+
+**TypeScript Compilation Errors:**
+```typescript
+// Error: Type errors during build
+error TS2307: Cannot find module '@types/react'
+
+// Solution: Install missing type definitions
+npm install --save-dev @types/react @types/react-dom
+
+// Check tsconfig.json includes
+{
+  "include": [
+    "./src/**/*",
+    "./packages/*/src/**/*",
+    "./plugins/*/src/**/*"
+  ]
+}
+```
+
+**Circular Dependency Issues:**
+```bash
+# Error: Circular dependency detected
+WARNING in Circular dependency detected
+
+# Solution: Analyze and fix circular imports
+npx madge --circular --extensions ts,tsx src/
+
+# Refactor to break circular dependencies
+// Instead of circular imports
+// utils/index.ts -> components/Chart.tsx -> utils/chartHelpers.ts -> utils/index.ts
+
+// Create separate modules
+// utils/chartHelpers.ts (specific utilities)
+// utils/common.ts (shared utilities)
+// components/Chart.tsx (import only needed utilities)
+```
+
+## Runtime Errors
+
+### React Component Errors
+
+**Component Rendering Failures:**
+```typescript
+// Error: Cannot read property 'map' of undefined
+const ChartList: React.FC<{ charts: Chart[] }> = ({ charts }) => {
+  // ❌ This will fail if charts is undefined
+  return (
+    <div>
+      {charts.map(chart => <ChartItem key={chart.id} chart={chart} />)}
+    </div>
+  );
+};
+
+// ✅ Solution: Add proper guards
+const ChartList: React.FC<{ charts?: Chart[] }> = ({ charts = [] }) => {
+  if (!charts.length) {
+    return <div>No charts available</div>;
+  }
+
+  return (
+    <div>
+      {charts.map(chart => <ChartItem key={chart.id} chart={chart} />)}
+    </div>
+  );
+};
+```
+
+**Hook Usage Errors:**
+```typescript
+// Error: Hooks called conditionally
+const MyComponent: React.FC<{ condition: boolean }> = ({ condition }) => {
+  // ❌ This violates rules of hooks
+  if (condition) {
+    const [state, setState] = useState(null);
+  }
+
+  return <div>Content</div>;
+};
+
+// ✅ Solution: Always call hooks at top level
+const MyComponent: React.FC<{ condition: boolean }> = ({ condition }) => {
+  const [state, setState] = useState(null);
+
+  if (!condition) {
+    return null;
+  }
+
+  return <div>Content with state</div>;
+};
+```
+
+**Error Boundary Implementation:**
+```typescript
+// Comprehensive error boundary
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode; fallback?: React.ComponentType<any> },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    // Log error to monitoring service
+    console.error('React Error Boundary caught an error:', {
+      error: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack,
+    });
+
+    // Report to error tracking service
+    if (window.Sentry) {
+      window.Sentry.captureException(error, {
+        contexts: {
+          react: {
+            componentStack: errorInfo.componentStack,
+          },
+        },
+      });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const Fallback = this.props.fallback || DefaultErrorFallback;
+      return <Fallback error={this.state.error} />;
+    }
+
+    return this.props.children;
+  }
+}
+
+// Usage in app
+const App: React.FC = () => (
+  <ErrorBoundary fallback={ChartErrorFallback}>
+    <Dashboard />
+  </ErrorBoundary>
+);
+```
+
+### Redux State Issues
+
+**State Update Problems:**
+```typescript
+// Error: Mutating state directly
+const chartReducer = (state = initialState, action) => {
+  switch (action.type) {
+    case 'UPDATE_CHART':
+      // ❌ Direct mutation
+      state.charts[action.chartId] = action.data;
+      return state;
+  }
+};
+
+// ✅ Solution: Immutable updates
+const chartReducer = (state = initialState, action) => {
+  switch (action.type) {
+    case 'UPDATE_CHART':
+      return {
+        ...state,
+        charts: {
+          ...state.charts,
+          [action.chartId]: action.data,
+        },
+      };
+  }
+};
+
+// Or use Immer for complex updates
+import { produce } from 'immer';
+
+const chartReducer = produce((draft, action) => {
+  switch (action.type) {
+    case 'UPDATE_CHART':
+      draft.charts[action.chartId] = action.data;
+      break;
+  }
+});
+```
+
+**Selector Performance Issues:**
+```typescript
+// ❌ Expensive selector that runs on every render
+const selectExpensiveData = (state: RootState) => {
+  return state.charts.map(chart => ({
+    ...chart,
+    processedData: expensiveComputation(chart.data),
+  }));
+};
+
+// ✅ Memoized selector
+const selectExpensiveData = createSelector(
+  [(state: RootState) => state.charts],
+  (charts) => charts.map(chart => ({
+    ...chart,
+    processedData: expensiveComputation(chart.data),
+  }))
+);
+```
+
+## API Integration Issues
+
+### Network Request Problems
+
+**CORS Issues:**
+```typescript
+// Error: CORS policy blocks request
+Access to fetch at 'http://localhost:8088/api/v1/chart/data'
+from origin 'http://localhost:9000' has been blocked by CORS policy
+
+// Solution: Configure webpack dev server proxy
+// webpack.config.js
+devServer: {
+  proxy: {
+    '/api/*': {
+      target: 'http://localhost:8088',
+      changeOrigin: true,
+      secure: false,
+    },
+  },
+}
+
+// Or configure SupersetClient
+SupersetClient.configure({
+  protocol: 'http',
+  host: 'localhost',
+  port: '8088',
+  credentials: 'include', // Include cookies for CORS
+});
+```
+
+**Authentication Token Issues:**
+```typescript
+// Error: 401 Unauthorized responses
+// Solution: Implement token refresh logic
+const apiMiddleware: Middleware = (store) => (next) => async (action) => {
+  const result = next(action);
+
+  // Handle API errors
+  if (action.type.endsWith('/rejected') && action.payload?.status === 401) {
+    // Try to refresh token
+    try {
+      await store.dispatch(refreshAuthToken()).unwrap();
+
+      // Retry original request
+      if (action.meta?.originalAction) {
+        return store.dispatch(action.meta.originalAction);
+      }
+    } catch (refreshError) {
+      // Refresh failed, redirect to login
+      store.dispatch(logout());
+      window.location.href = '/login';
+    }
+  }
+
+  return result;
+};
+```
+
+**Request Timeout Handling:**
+```typescript
+// Configure request timeouts
+const createTimeoutSignal = (timeoutMs: number): AbortSignal => {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+};
+
+// Use with SupersetClient
+const fetchWithTimeout = async (endpoint: string, timeoutMs = 30000) => {
+  try {
+    const response = await SupersetClient.get({
+      endpoint,
+      signal: createTimeoutSignal(timeoutMs),
+    });
+    return response.json;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Request timed out');
+    }
+    throw error;
+  }
+};
+```
+
+## Performance Issues
+
+### Slow Rendering Diagnosis
+
+**React DevTools Profiler:**
+```typescript
+// Wrap components to profile rendering
+import { Profiler } from 'react';
+
+const onRenderCallback = (
+  id: string,
+  phase: 'mount' | 'update',
+  actualDuration: number,
+  baseDuration: number,
+  startTime: number,
+  commitTime: number
+) => {
+  if (actualDuration > 100) {
+    console.warn(`Slow render detected in ${id}:`, {
+      phase,
+      actualDuration,
+      baseDuration,
+    });
+  }
+};
+
+const ProfiledComponent: React.FC = () => (
+  <Profiler id="SlowComponent" onRender={onRenderCallback}>
+    <SlowComponent />
+  </Profiler>
+);
+```
+
+**Memory Leak Detection:**
+```typescript
+// Memory usage monitoring
+const useMemoryMonitor = (componentName: string) => {
+  useEffect(() => {
+    const checkMemory = () => {
+      if ('memory' in performance) {
+        const memory = (performance as any).memory;
+        console.log(`${componentName} memory usage:`, {
+          used: Math.round(memory.usedJSHeapSize / 1024 / 1024) + ' MB',
+          total: Math.round(memory.totalJSHeapSize / 1024 / 1024) + ' MB',
+          limit: Math.round(memory.jsHeapSizeLimit / 1024 / 1024) + ' MB',
+        });
+      }
+    };
+
+    checkMemory();
+    const interval = setInterval(checkMemory, 5000);
+
+    return () => clearInterval(interval);
+  }, [componentName]);
+};
+
+// Usage in components
+const Dashboard: React.FC = () => {
+  useMemoryMonitor('Dashboard');
+  // Component logic
+};
+```
+
+### Bundle Size Issues
+
+**Analyze Large Dependencies:**
+```bash
+# Generate bundle analysis
+npm run bundle-stats
+
+# Identify large dependencies
+npx webpack-bundle-analyzer dist/static/assets/statistics.json
+
+# Check for duplicate dependencies
+npx duplicate-package-checker-webpack-plugin
+```
+
+**Tree Shaking Problems:**
+```typescript
+// ❌ Import that prevents tree shaking
+import * as d3 from 'd3';
+import { Button } from 'antd';
+
+// ✅ Specific imports for better tree shaking
+import { scaleLinear } from 'd3-scale';
+import { select } from 'd3-selection';
+import Button from 'antd/lib/button';
+
+// Check package.json sideEffects
+{
+  "sideEffects": false, // Enable tree shaking
+}
+
+// Or specify specific files with side effects
+{
+  "sideEffects": ["*.css", "*.less", "./src/polyfills.js"]
+}
+```
+
+## Development Environment Issues
+
+### Hot Reload Problems
+
+**Hot Module Replacement Not Working:**
+```javascript
+// webpack.config.js - Ensure HMR is properly configured
+module.exports = {
+  devServer: {
+    hot: true,
+    liveReload: false, // Disable live reload when using HMR
+  },
+  plugins: [
+    new webpack.HotModuleReplacementPlugin(),
+  ],
+};
+
+// In React components, accept hot updates
+if (module.hot) {
+  module.hot.accept('./App', () => {
+    // Re-render the app when App.js changes
+  });
+}
+```
+
+**Source Map Issues:**
+```javascript
+// webpack.config.js - Configure source maps for debugging
+module.exports = {
+  devtool: process.env.NODE_ENV === 'development'
+    ? 'eval-source-map'  // Fast rebuilds
+    : 'source-map',      // Production debugging
+};
+
+// TypeScript source maps
+// tsconfig.json
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "declarationMap": true
+  }
+}
+```
+
+### IDE and Editor Issues
+
+**TypeScript IntelliSense Problems:**
+```json
+// .vscode/settings.json
+{
+  "typescript.preferences.importModuleSpecifier": "relative",
+  "typescript.suggest.autoImports": true,
+  "typescript.workspaceSymbols.scope": "allOpenProjects",
+
+  // Restart TS server when having issues
+  "typescript.disableAutomaticTypeAcquisition": false
+}
+
+// Force TypeScript to use workspace version
+// Command Palette: "TypeScript: Select TypeScript Version"
+```
+
+**ESLint Configuration Issues:**
+```json
+// .vscode/settings.json
+{
+  "eslint.workingDirectories": ["superset-frontend"],
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "typescript",
+    "typescriptreact"
+  ]
+}
+```
+
+## Debugging Strategies
+
+### Browser DevTools Usage
+
+**React DevTools:**
+```typescript
+// Enable React DevTools profiler
+// Add to index.html in development
+<script>
+  if (typeof window !== 'undefined') {
+    window.__REACT_DEVTOOLS_GLOBAL_HOOK__?.onCommitFiberRoot = (id, root) => {
+      // Custom profiling logic
+    };
+  }
+</script>
+
+// Component debugging
+const DebugInfo: React.FC<{ data: any }> = ({ data }) => {
+  // Only show in development
+  if (process.env.NODE_ENV !== 'development') {
+    return null;
+  }
+
+  return (
+    <details style={{ fontSize: '12px', color: '#666' }}>
+      <summary>Debug Info</summary>
+      <pre>{JSON.stringify(data, null, 2)}</pre>
+    </details>
+  );
+};
+```
+
+**Network Request Debugging:**
+```typescript
+// Add request/response interceptors
+SupersetClient.configure({
+  requestInterceptor: (request) => {
+    console.log('API Request:', request);
+    return request;
+  },
+  responseInterceptor: (response) => {
+    console.log('API Response:', response);
+    return response;
+  },
+});
+
+// Debug specific requests
+const debugApiCall = async (endpoint: string) => {
+  console.group(`API Call: ${endpoint}`);
+
+  try {
+    const startTime = performance.now();
+    const response = await SupersetClient.get({ endpoint });
+    const endTime = performance.now();
+
+    console.log(`Duration: ${endTime - startTime}ms`);
+    console.log('Response:', response.json);
+
+    return response.json;
+  } catch (error) {
+    console.error('API Error:', error);
+    throw error;
+  } finally {
+    console.groupEnd();
+  }
+};
+```
+
+### Logging and Monitoring
+
+**Structured Logging:**
+```typescript
+// Logger utility
+class Logger {
+  private static instance: Logger;
+  private logLevel: 'debug' | 'info' | 'warn' | 'error' = 'info';
+
+  static getInstance(): Logger {
+    if (!Logger.instance) {
+      Logger.instance = new Logger();
+    }
+    return Logger.instance;
+  }
+
+  debug(message: string, data?: any): void {
+    if (this.shouldLog('debug')) {
+      console.debug(`[DEBUG] ${message}`, data);
+    }
+  }
+
+  info(message: string, data?: any): void {
+    if (this.shouldLog('info')) {
+      console.info(`[INFO] ${message}`, data);
+    }
+  }
+
+  warn(message: string, data?: any): void {
+    if (this.shouldLog('warn')) {
+      console.warn(`[WARN] ${message}`, data);
+    }
+  }
+
+  error(message: string, error?: Error): void {
+    if (this.shouldLog('error')) {
+      console.error(`[ERROR] ${message}`, error);
+
+      // Send to error tracking service
+      if (window.Sentry && error) {
+        window.Sentry.captureException(error, {
+          tags: { component: 'frontend' },
+        });
+      }
+    }
+  }
+
+  private shouldLog(level: string): boolean {
+    const levels = ['debug', 'info', 'warn', 'error'];
+    return levels.indexOf(level) >= levels.indexOf(this.logLevel);
+  }
+}
+
+// Usage throughout application
+const logger = Logger.getInstance();
+logger.info('Chart rendered successfully', { chartId: 123 });
+logger.error('Chart rendering failed', error);
+```
+
+This troubleshooting guide covers the most common issues encountered during Superset frontend development and provides practical solutions for debugging and resolving problems efficiently.

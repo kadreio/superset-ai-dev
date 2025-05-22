@@ -1,0 +1,620 @@
+# State Management Guide
+
+Comprehensive guide to Redux state management patterns in Superset's React frontend, including store structure, actions, selectors, and async state handling.
+
+## Redux Architecture Overview
+
+Superset uses a **complex Redux store** with multiple domain-specific slices that handle different aspects of the application state.
+
+### Store Structure
+
+**Main Store Configuration (`src/views/store.ts`):**
+```typescript
+const store = configureStore({
+  reducer: {
+    // Core application state
+    app: appReducer,
+    user: userReducer,
+    common: commonReducer,
+
+    // Feature-specific state
+    sqlLab: sqlLabReducer,
+    charts: chartReducer,
+    dashboards: dashboardReducer,
+    explore: exploreReducer,
+
+    // Cross-cutting concerns
+    dataMask: dataMaskReducer,
+    nativeFilters: nativeFiltersReducer,
+    messageToasts: messageToastsReducer,
+
+    // API and async state
+    api: apiSlice.reducer,
+  },
+
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      serializableCheck: {
+        ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER],
+      },
+    }).concat(
+      apiSlice.middleware,
+      loggerMiddleware,
+      persistenceMiddleware
+    ),
+});
+```
+
+## Core State Slices
+
+### User State
+
+**User Reducer (`src/views/store.ts`):**
+```typescript
+interface UserState {
+  userId: number;
+  username: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  isActive: boolean;
+  roles: UserRole[];
+  permissions: string[];
+  createdOn: string;
+  isAnonymous: boolean;
+}
+
+// Selectors
+export const selectCurrentUser = (state: RootState) => state.user;
+export const selectUserRoles = (state: RootState) => state.user.roles;
+export const selectUserPermissions = (state: RootState) => state.user.permissions;
+
+// Usage in components
+const currentUser = useSelector(selectCurrentUser);
+const hasPermission = useSelector(state =>
+  selectUserPermissions(state).includes('can_write')
+);
+```
+
+### Chart State
+
+**Chart Reducer Pattern:**
+```typescript
+// Chart state structure
+interface ChartState {
+  [chartId: string]: {
+    id: number;
+    form_data: any;
+    latest_query_form_data: any;
+    query_controller: AbortController | null;
+    chart_status: 'loading' | 'rendered' | 'failed' | null;
+    query_response: any;
+    triggered_by: string;
+    chart_stack_trace: string | null;
+    chart_alert: string | null;
+    slice_name: string;
+    annotation_data?: AnnotationData;
+    annotation_error?: any;
+  };
+}
+
+// Actions
+const CHART_UPDATE_STARTED = 'CHART_UPDATE_STARTED';
+const CHART_UPDATE_SUCCESS = 'CHART_UPDATE_SUCCESS';
+const CHART_UPDATE_FAILURE = 'CHART_UPDATE_FAILURE';
+
+// Action creators
+export const runQuery = (formData: QueryFormData, force = false) => ({
+  type: CHART_UPDATE_STARTED,
+  formData,
+  force,
+  chart_id: formData.slice_id,
+});
+
+// Async thunk example
+export const fetchChartData = createAsyncThunk(
+  'chart/fetchData',
+  async ({ formData, force }: { formData: QueryFormData; force?: boolean }) => {
+    const response = await SupersetClient.post({
+      endpoint: '/api/v1/chart/data',
+      body: JSON.stringify({ queries: [formData] }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    return response.json;
+  }
+);
+```
+
+### Dashboard State
+
+**Dashboard State Management:**
+```typescript
+interface DashboardState {
+  // Dashboard metadata
+  id: number;
+  dashboard_title: string;
+  slug: string;
+  css: string;
+  colorNamespace: string;
+  colorScheme: string;
+
+  // Layout and positioning
+  layout: DashboardLayout;
+
+  // Filter state
+  filters: DashboardFilters;
+  nativeFilters: NativeFiltersState;
+
+  // UI state
+  editMode: boolean;
+  builderPaneType: string;
+  colorSchemeRegistry: Registry;
+
+  // Charts and components
+  slices: { [id: string]: ChartState };
+  datasources: { [key: string]: Datasource };
+}
+
+// Complex layout updates
+export const updateDashboardLayout = (layout: DashboardLayout) => ({
+  type: UPDATE_DASHBOARD_LAYOUT,
+  layout,
+});
+
+// Filter interactions
+export const applyFilterValue = (
+  filterId: string,
+  value: any,
+  merge = true
+) => ({
+  type: APPLY_FILTER_VALUE,
+  filterId,
+  value,
+  merge,
+});
+```
+
+## Advanced State Patterns
+
+### Data Mask and Cross-Filtering
+
+**Data Mask for Filter State:**
+```typescript
+interface DataMaskState {
+  nativeFilters: {
+    [filterId: string]: {
+      filterState?: {
+        value?: any;
+      };
+      extraFormData?: {
+        filters?: Filter[];
+        adhoc_filters?: AdhocFilter[];
+      };
+    };
+  };
+
+  // Chart-level filters
+  chartFilters: {
+    [chartId: string]: {
+      extraFormData: ExtraFormData;
+    };
+  };
+}
+
+// Selectors for cross-filtering
+export const selectNativeFiltersState = (state: RootState) =>
+  state.dataMask.nativeFilters;
+
+export const selectChartFilters = (state: RootState, chartId: string) =>
+  state.dataMask.chartFilters[chartId];
+
+// Combined filter selector
+export const selectAppliedFilters = createSelector(
+  [selectNativeFiltersState, (state, chartId) => chartId],
+  (nativeFilters, chartId) => {
+    const appliedFilters: Filter[] = [];
+
+    Object.values(nativeFilters).forEach(filter => {
+      if (filter.extraFormData?.filters) {
+        appliedFilters.push(...filter.extraFormData.filters);
+      }
+    });
+
+    return appliedFilters;
+  }
+);
+```
+
+### SQL Lab State Persistence
+
+**SQL Lab State with Persistence:**
+```typescript
+interface SqlLabState {
+  queries: { [queryId: string]: QueryState };
+  databases: { [id: string]: DatabaseState };
+  tables: { [tableId: string]: TableState };
+  tabHistory: string[];
+  tables: { [tableKey: string]: Table };
+  queriesLastUpdate: number;
+  user: UserState;
+
+  // Active query state
+  queryEditors: QueryEditor[];
+  activeSouthPaneTab: string;
+  networkOn: boolean;
+  offline: boolean;
+}
+
+// Persistence middleware
+const persistSqlLabState = (store: Store) => (next: Dispatch) => (action: AnyAction) => {
+  const result = next(action);
+
+  // Persist specific SQL Lab state to localStorage
+  if (action.type.startsWith('SQLLAB_')) {
+    const state = store.getState();
+    const sqlLabState = state.sqlLab;
+
+    localStorage.setItem(
+      'redux-localstorage-simple-sqlLab',
+      JSON.stringify({
+        queryEditors: sqlLabState.queryEditors,
+        tabHistory: sqlLabState.tabHistory,
+        tables: sqlLabState.tables,
+      })
+    );
+  }
+
+  return result;
+};
+
+// Hydration from localStorage
+export const loadStoredState = (): Partial<SqlLabState> => {
+  try {
+    const serializedState = localStorage.getItem('redux-localstorage-simple-sqlLab');
+    if (serializedState === null) {
+      return {};
+    }
+    return JSON.parse(serializedState);
+  } catch (err) {
+    return {};
+  }
+};
+```
+
+## Async State Management
+
+### RTK Query Integration
+
+**API Slice Configuration:**
+```typescript
+// API slice for async operations
+export const apiSlice = createApi({
+  reducerPath: 'api',
+  baseQuery: fetchBaseQuery({
+    baseUrl: '/api/v1/',
+    prepareHeaders: (headers, { getState }) => {
+      const token = (getState() as RootState).auth.token;
+      if (token) {
+        headers.set('authorization', `Bearer ${token}`);
+      }
+      return headers;
+    },
+  }),
+
+  tagTypes: ['Chart', 'Dashboard', 'Dataset', 'Database'],
+
+  endpoints: (builder) => ({
+    // Chart endpoints
+    getChart: builder.query<Chart, number>({
+      query: (id) => `chart/${id}`,
+      providesTags: (result, error, id) => [{ type: 'Chart', id }],
+    }),
+
+    updateChart: builder.mutation<Chart, Partial<Chart> & Pick<Chart, 'id'>>({
+      query: ({ id, ...patch }) => ({
+        url: `chart/${id}`,
+        method: 'PUT',
+        body: patch,
+      }),
+      invalidatesTags: (result, error, { id }) => [{ type: 'Chart', id }],
+    }),
+
+    // Dashboard endpoints
+    getDashboards: builder.query<Dashboard[], void>({
+      query: () => 'dashboard/',
+      providesTags: (result) =>
+        result
+          ? [
+              ...result.map(({ id }) => ({ type: 'Dashboard' as const, id })),
+              { type: 'Dashboard', id: 'LIST' },
+            ]
+          : [{ type: 'Dashboard', id: 'LIST' }],
+    }),
+  }),
+});
+
+// Generated hooks
+export const {
+  useGetChartQuery,
+  useUpdateChartMutation,
+  useGetDashboardsQuery,
+} = apiSlice;
+```
+
+### Custom Async Thunks
+
+**Complex Async Operations:**
+```typescript
+// Chart data fetching with error handling
+export const fetchChartDataAndMetadata = createAsyncThunk(
+  'chart/fetchDataAndMetadata',
+  async (
+    { chartId, formData }: { chartId: number; formData: QueryFormData },
+    { dispatch, rejectWithValue }
+  ) => {
+    try {
+      dispatch(chartUpdateStarted({ chartId }));
+
+      // Fetch chart data
+      const dataResponse = await SupersetClient.post({
+        endpoint: '/api/v1/chart/data',
+        body: JSON.stringify({
+          queries: [{ ...formData, result_format: 'json' }],
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      // Fetch chart metadata in parallel
+      const metadataResponse = await SupersetClient.get({
+        endpoint: `/api/v1/chart/${chartId}`,
+      });
+
+      return {
+        chartData: dataResponse.json,
+        metadata: metadataResponse.json,
+      };
+    } catch (error) {
+      return rejectWithValue({
+        error: error.message,
+        stack: error.stack,
+      });
+    }
+  }
+);
+
+// Usage in components
+const dispatch = useAppDispatch();
+const chartState = useSelector(state => state.charts[chartId]);
+
+const handleRefresh = useCallback(() => {
+  dispatch(fetchChartDataAndMetadata({
+    chartId,
+    formData: chartState.form_data
+  }));
+}, [dispatch, chartId, chartState.form_data]);
+```
+
+## Selectors and Memoization
+
+### Memoized Selectors
+
+**Complex Data Transformations:**
+```typescript
+// Chart data selector with memoization
+export const selectChartFormData = createSelector(
+  [(state: RootState, chartId: string) => state.charts[chartId]],
+  (chart) => chart?.form_data || {}
+);
+
+// Dashboard layout selector
+export const selectDashboardLayout = createSelector(
+  [(state: RootState) => state.dashboardLayout],
+  (layout) => layout
+);
+
+// Filtered charts selector
+export const selectFilteredCharts = createSelector(
+  [
+    (state: RootState) => state.charts,
+    (state: RootState) => state.dataMask.nativeFilters,
+    (state: RootState, filters) => filters,
+  ],
+  (charts, nativeFilters, appliedFilters) => {
+    return Object.values(charts).filter(chart => {
+      // Apply filtering logic
+      return matchesFilters(chart, { ...nativeFilters, ...appliedFilters });
+    });
+  }
+);
+
+// Dashboard charts with applied filters
+export const selectDashboardChartsWithFilters = createSelector(
+  [
+    selectDashboardLayout,
+    (state: RootState) => state.charts,
+    (state: RootState) => state.dataMask,
+  ],
+  (layout, charts, dataMask) => {
+    const chartsInDashboard = Object.keys(layout)
+      .filter(key => layout[key].type === CHART_TYPE)
+      .map(key => layout[key].meta.chartId);
+
+    return chartsInDashboard.map(chartId => ({
+      ...charts[chartId],
+      appliedFilters: getAppliedFilters(dataMask, chartId),
+    }));
+  }
+);
+```
+
+## Component Integration Patterns
+
+### Using State in Components
+
+**Chart Component with Redux:**
+```typescript
+// Chart container component
+const ChartContainer: React.FC<{ chartId: string }> = ({ chartId }) => {
+  const dispatch = useAppDispatch();
+
+  // Select chart state
+  const chart = useSelector((state: RootState) => state.charts[chartId]);
+  const appliedFilters = useSelector(state =>
+    selectAppliedFilters(state, chartId)
+  );
+
+  // Fetch chart data on mount and filter changes
+  useEffect(() => {
+    if (chart?.form_data) {
+      dispatch(fetchChartData({
+        formData: { ...chart.form_data, extra_filters: appliedFilters },
+        force: false,
+      }));
+    }
+  }, [dispatch, chart?.form_data, appliedFilters]);
+
+  // Handle chart interactions
+  const handleFilterClick = useCallback((filter: DataFilter) => {
+    dispatch(addFilter({ chartId, filter }));
+  }, [dispatch, chartId]);
+
+  if (chart?.chart_status === 'loading') {
+    return <LoadingIndicator />;
+  }
+
+  if (chart?.chart_status === 'failed') {
+    return <ErrorMessage error={chart.chart_alert} />;
+  }
+
+  return (
+    <Chart
+      chartData={chart?.query_response}
+      formData={chart?.form_data}
+      onAddFilter={handleFilterClick}
+    />
+  );
+};
+```
+
+### Dashboard State Management
+
+**Dashboard Component Pattern:**
+```typescript
+const Dashboard: React.FC = () => {
+  const dispatch = useAppDispatch();
+  const dashboard = useSelector(selectDashboard);
+  const layout = useSelector(selectDashboardLayout);
+  const editMode = useSelector(state => state.dashboardState.editMode);
+
+  // Handle layout changes
+  const handleLayoutChange = useCallback((newLayout: DashboardLayout) => {
+    if (editMode) {
+      dispatch(updateDashboardLayout(newLayout));
+    }
+  }, [dispatch, editMode]);
+
+  // Handle filter application
+  const handleFilterChange = useCallback((filterId: string, value: any) => {
+    dispatch(updateNativeFilter({ filterId, value }));
+  }, [dispatch]);
+
+  return (
+    <DndProvider backend={HTML5Backend}>
+      <DashboardHeader dashboard={dashboard} />
+
+      <FilterBar
+        filters={dashboard.nativeFilters}
+        onFilterChange={handleFilterChange}
+      />
+
+      <DashboardGrid
+        layout={layout}
+        editMode={editMode}
+        onLayoutChange={handleLayoutChange}
+      />
+    </DndProvider>
+  );
+};
+```
+
+## Performance Optimization
+
+### State Normalization
+
+**Normalized State Structure:**
+```typescript
+// Normalized chart state
+interface NormalizedChartState {
+  charts: {
+    byId: { [id: string]: Chart };
+    allIds: string[];
+  };
+  queries: {
+    byId: { [id: string]: QueryState };
+    allIds: string[];
+  };
+}
+
+// Normalization selectors
+export const selectAllCharts = (state: RootState) =>
+  state.charts.allIds.map(id => state.charts.byId[id]);
+
+export const selectChartById = (state: RootState, chartId: string) =>
+  state.charts.byId[chartId];
+```
+
+### Optimized Component Updates
+
+**Preventing Unnecessary Re-renders:**
+```typescript
+// Memoized component with shallow comparison
+const ChartComponent = React.memo<ChartProps>(
+  ({ chartData, formData, onUpdate }) => {
+    // Chart rendering logic
+    return <ChartVisualization data={chartData} config={formData} />;
+  },
+  (prevProps, nextProps) => {
+    // Custom comparison for complex objects
+    return (
+      shallowEqual(prevProps.chartData, nextProps.chartData) &&
+      shallowEqual(prevProps.formData, nextProps.formData)
+    );
+  }
+);
+
+// Optimized selector usage
+const useChartData = (chartId: string) => {
+  return useSelector(
+    useCallback(
+      (state: RootState) => selectChartById(state, chartId),
+      [chartId]
+    ),
+    shallowEqual
+  );
+};
+```
+
+## Best Practices
+
+### State Organization
+
+1. **Domain-Driven Design**: Organize state by business domain
+2. **Normalized Data**: Use normalized structures for relational data
+3. **Immutable Updates**: Always return new state objects
+4. **Selector Composition**: Build complex selectors from simple ones
+
+### Performance
+
+1. **Memoized Selectors**: Use `reselect` for expensive computations
+2. **Component Optimization**: Memoize components that receive complex props
+3. **Batch Updates**: Group related state updates together
+4. **Lazy Loading**: Load state only when needed
+
+### Testing
+
+1. **Reducer Testing**: Test state transitions in isolation
+2. **Selector Testing**: Verify memoization and correctness
+3. **Integration Testing**: Test component-state interactions
+4. **Async Testing**: Mock async operations properly
+
+This state management system provides robust, scalable state handling for complex dashboard and visualization workflows while maintaining performance and developer experience.

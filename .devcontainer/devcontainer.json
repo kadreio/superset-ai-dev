@@ -4,11 +4,11 @@
   "service": "superset-dev",
   "workspaceFolder": "/app",
   "shutdownAction": "stopCompose",
-  
+
   "features": {
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0.5": {}
   },
-  
+
   "mounts": [
     // Use named volume for node_modules to improve performance and avoid permission issues
     "source=superset-node-modules,target=/app/superset-frontend/node_modules,type=volume"
@@ -74,7 +74,7 @@
   },
 
   "postCreateCommand": "bash .devcontainer/setup.sh",
-  "postStartCommand": "bash .devcontainer/start-services.sh",
+  "postStartCommand": "bash .devcontainer/restart-services.sh",
 
   "remoteUser": "superset",
   "containerEnv": {

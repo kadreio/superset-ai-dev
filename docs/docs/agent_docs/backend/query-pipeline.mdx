@@ -1,0 +1,911 @@
+# Query Execution Pipeline
+
+Deep dive into how Superset processes queries from request to response, including caching, security, and optimization layers.
+
+## Pipeline Overview
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Frontend      │    │   API Layer     │    │   Command       │
+│   Query Request │───▶│   Validation    │───▶│   Processing    │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                        │
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Database      │    │   Query Engine  │    │   Security      │
+│   Execution     │◀───│   (SQLAlchemy)  │◀───│   Layer (RLS)   │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                        │
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Response      │    │   Result        │    │   Cache         │
+│   Formatting    │◀───│   Processing    │◀───│   Layer         │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+## Query Context Structure
+
+### Query Object Model
+```python
+# /superset/common/query_object.py
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
+
+@dataclass
+class QueryObject:
+    """Represents a query to be executed against a datasource."""
+
+    # Core query parameters
+    datasource: Optional[Any] = None
+    columns: List[str] = None
+    groupby: List[str] = None
+    metrics: List[Union[str, Dict[str, Any]]] = None
+
+    # Filtering
+    filters: List[Dict[str, Any]] = None
+    having: List[Dict[str, Any]] = None
+    where: str = None
+
+    # Aggregation and sorting
+    orderby: List[List[str]] = None
+    row_limit: Optional[int] = None
+    row_offset: Optional[int] = None
+
+    # Time-based queries
+    granularity: Optional[str] = None
+    from_dttm: Optional[datetime] = None
+    to_dttm: Optional[datetime] = None
+
+    # Advanced options
+    extras: Dict[str, Any] = None
+    annotation_layers: List[Dict[str, Any]] = None
+    applied_time_extras: Dict[str, str] = None
+
+    # Post-processing
+    post_processing: List[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'datasource': self.datasource.to_dict() if self.datasource else None,
+            'columns': self.columns or [],
+            'groupby': self.groupby or [],
+            'metrics': self.metrics or [],
+            'filters': self.filters or [],
+            'having': self.having or [],
+            'where': self.where,
+            'orderby': self.orderby or [],
+            'row_limit': self.row_limit,
+            'row_offset': self.row_offset,
+            'granularity': self.granularity,
+            'from_dttm': self.from_dttm.isoformat() if self.from_dttm else None,
+            'to_dttm': self.to_dttm.isoformat() if self.to_dttm else None,
+            'extras': self.extras or {},
+            'annotation_layers': self.annotation_layers or [],
+            'applied_time_extras': self.applied_time_extras or {},
+            'post_processing': self.post_processing or []
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'QueryObject':
+        """Create from dictionary."""
+        return cls(
+            columns=data.get('columns', []),
+            groupby=data.get('groupby', []),
+            metrics=data.get('metrics', []),
+            filters=data.get('filters', []),
+            having=data.get('having', []),
+            where=data.get('where'),
+            orderby=data.get('orderby', []),
+            row_limit=data.get('row_limit'),
+            row_offset=data.get('row_offset'),
+            granularity=data.get('granularity'),
+            from_dttm=parse_datetime(data.get('from_dttm')),
+            to_dttm=parse_datetime(data.get('to_dttm')),
+            extras=data.get('extras', {}),
+            annotation_layers=data.get('annotation_layers', []),
+            applied_time_extras=data.get('applied_time_extras', {}),
+            post_processing=data.get('post_processing', [])
+        )
+```
+
+### Query Context Processing
+```python
+# /superset/common/query_context_processor.py
+class QueryContextProcessor:
+    """Processes query context and executes queries."""
+
+    def __init__(self, query_context: Dict[str, Any]):
+        self.query_context = query_context
+        self.datasource = self._get_datasource()
+        self.result_format = query_context.get('result_format', 'json')
+        self.result_type = query_context.get('result_type', 'full')
+
+    def get_query_result(self, query_obj: QueryObject) -> Dict[str, Any]:
+        """Execute query and return formatted results."""
+
+        # 1. Security checks
+        self._validate_permissions(query_obj)
+
+        # 2. Apply row-level security
+        query_obj = self._apply_rls_filters(query_obj)
+
+        # 3. Check cache
+        cache_key = self._generate_cache_key(query_obj)
+        cached_result = self._get_cached_result(cache_key)
+        if cached_result:
+            return self._format_cached_result(cached_result)
+
+        # 4. Execute query
+        df = self._execute_query(query_obj)
+
+        # 5. Apply post-processing
+        df = self._apply_post_processing(df, query_obj)
+
+        # 6. Format results
+        result = self._format_results(df, query_obj)
+
+        # 7. Cache results
+        self._cache_results(cache_key, result)
+
+        return result
+
+    def _validate_permissions(self, query_obj: QueryObject) -> None:
+        """Validate user permissions for query execution."""
+        # Check datasource access
+        if not security_manager.can_access_datasource(self.datasource):
+            raise ForbiddenError("Access denied to datasource")
+
+        # Check column access
+        for column in query_obj.columns or []:
+            if not security_manager.can_access_column(self.datasource, column):
+                raise ForbiddenError(f"Access denied to column: {column}")
+
+        # Check metric access
+        for metric in query_obj.metrics or []:
+            if isinstance(metric, dict):
+                metric_name = metric.get('label', metric.get('expressionType'))
+            else:
+                metric_name = metric
+
+            if not security_manager.can_access_metric(self.datasource, metric_name):
+                raise ForbiddenError(f"Access denied to metric: {metric_name}")
+
+    def _apply_rls_filters(self, query_obj: QueryObject) -> QueryObject:
+        """Apply row-level security filters."""
+        rls_filters = security_manager.get_rls_filters(self.datasource)
+
+        if rls_filters:
+            # Add RLS filters to existing filters
+            additional_filters = []
+            for rls_filter in rls_filters:
+                filter_clause = self._build_rls_filter(rls_filter)
+                additional_filters.append(filter_clause)
+
+            # Merge with existing filters
+            query_obj.filters = (query_obj.filters or []) + additional_filters
+
+        return query_obj
+
+    def _generate_cache_key(self, query_obj: QueryObject) -> str:
+        """Generate cache key for query."""
+        # Include user context for RLS
+        user_context = {
+            'user_id': security_manager.current_user.id,
+            'roles': [role.name for role in security_manager.current_user.roles]
+        }
+
+        cache_data = {
+            'query_obj': query_obj.to_dict(),
+            'datasource_id': self.datasource.id,
+            'user_context': user_context,
+            'superset_version': app.config.get('VERSION_STRING')
+        }
+
+        return hashlib.md5(
+            json.dumps(cache_data, sort_keys=True).encode('utf-8')
+        ).hexdigest()
+
+    def _execute_query(self, query_obj: QueryObject) -> pd.DataFrame:
+        """Execute query against datasource."""
+        start_time = time.time()
+
+        try:
+            # Log query execution
+            logger.info(f"Executing query for datasource {self.datasource.id}")
+
+            # Execute query through datasource
+            df = self.datasource.query(query_obj)
+
+            # Log performance metrics
+            execution_time = time.time() - start_time
+            logger.info(f"Query executed in {execution_time:.2f}s, returned {len(df)} rows")
+
+            # Record metrics
+            metrics.timing('query.execution_time', execution_time)
+            metrics.histogram('query.result_size', len(df))
+
+            return df
+
+        except Exception as ex:
+            execution_time = time.time() - start_time
+            logger.error(f"Query failed after {execution_time:.2f}s: {ex}")
+            metrics.incr('query.errors')
+            raise
+
+    def _apply_post_processing(self, df: pd.DataFrame, query_obj: QueryObject) -> pd.DataFrame:
+        """Apply post-processing operations to query results."""
+        if not query_obj.post_processing:
+            return df
+
+        for operation in query_obj.post_processing:
+            operation_type = operation.get('operation')
+
+            if operation_type == 'pivot':
+                df = self._apply_pivot(df, operation)
+            elif operation_type == 'aggregate':
+                df = self._apply_aggregation(df, operation)
+            elif operation_type == 'sort':
+                df = self._apply_sort(df, operation)
+            elif operation_type == 'rolling':
+                df = self._apply_rolling_window(df, operation)
+            elif operation_type == 'compare':
+                df = self._apply_comparison(df, operation)
+            else:
+                logger.warning(f"Unknown post-processing operation: {operation_type}")
+
+        return df
+
+    def _format_results(self, df: pd.DataFrame, query_obj: QueryObject) -> Dict[str, Any]:
+        """Format query results for response."""
+        if self.result_format == 'csv':
+            return self._format_csv(df)
+        elif self.result_format == 'json':
+            return self._format_json(df, query_obj)
+        elif self.result_format == 'xlsx':
+            return self._format_excel(df)
+        else:
+            raise ValueError(f"Unsupported result format: {self.result_format}")
+
+    def _format_json(self, df: pd.DataFrame, query_obj: QueryObject) -> Dict[str, Any]:
+        """Format results as JSON."""
+        # Convert DataFrame to records
+        data = df.to_dict('records')
+
+        # Add metadata
+        result = {
+            'data': data,
+            'colnames': list(df.columns),
+            'coltypes': [str(dtype) for dtype in df.dtypes],
+            'rowcount': len(df),
+            'applied_filters': query_obj.filters or [],
+            'cached_dttm': None,  # Set if from cache
+            'is_cached': False,   # Set if from cache
+            'query': getattr(self.datasource, 'last_query', ''),
+            'status': 'success',
+            'stacktrace': None,
+            'error': None
+        }
+
+        return result
+```
+
+## Datasource Query Interface
+
+### Base Datasource Implementation
+```python
+# /superset/connectors/base/models.py
+class BaseDatasource(AuditMixinNullable, ImportExportMixin):
+    """Base class for all datasources."""
+
+    def query(self, query_obj: QueryObject) -> pd.DataFrame:
+        """Execute query and return DataFrame."""
+        raise NotImplementedError()
+
+    def get_query_str(self, query_obj: QueryObject) -> str:
+        """Get SQL query string for debugging."""
+        raise NotImplementedError()
+
+    def get_columns(self) -> List[Dict[str, Any]]:
+        """Get available columns."""
+        raise NotImplementedError()
+
+    def get_metrics(self) -> List[Dict[str, Any]]:
+        """Get available metrics."""
+        raise NotImplementedError()
+```
+
+### SQL Table Datasource
+```python
+# /superset/connectors/sqla/models.py
+class SqlaTable(BaseDatasource):
+    """SQL-based datasource implementation."""
+
+    def query(self, query_obj: QueryObject) -> pd.DataFrame:
+        """Execute SQL query and return DataFrame."""
+
+        # Build SQL query
+        sql = self.get_query_str(query_obj)
+
+        # Execute with database engine
+        engine = self.database.get_sqla_engine()
+
+        with engine.connect() as conn:
+            # Set query timeout
+            if query_obj.extras and 'timeout' in query_obj.extras:
+                conn.execute(text(f"SET SESSION max_execution_time = {query_obj.extras['timeout']}"))
+
+            # Execute query
+            result = conn.execute(text(sql))
+
+            # Convert to DataFrame
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+
+            # Store query for debugging
+            self.last_query = sql
+
+            return df
+
+    def get_query_str(self, query_obj: QueryObject) -> str:
+        """Build SQL query string."""
+        # Use database engine spec to build query
+        db_engine_spec = self.database.db_engine_spec
+
+        # Build SELECT clause
+        select_exprs = []
+
+        # Add columns
+        for column in query_obj.columns or []:
+            col_obj = self.get_column(column)
+            if col_obj:
+                select_exprs.append(col_obj.get_sqla_col())
+
+        # Add groupby columns
+        for column in query_obj.groupby or []:
+            col_obj = self.get_column(column)
+            if col_obj:
+                select_exprs.append(col_obj.get_sqla_col())
+
+        # Add metrics
+        for metric in query_obj.metrics or []:
+            metric_obj = self.get_metric(metric)
+            if metric_obj:
+                select_exprs.append(metric_obj.get_sqla_col())
+
+        # Build FROM clause
+        from_clause = self.get_from_clause()
+
+        # Build WHERE clause
+        where_clause = self._build_where_clause(query_obj)
+
+        # Build GROUP BY clause
+        group_by_clause = self._build_group_by_clause(query_obj)
+
+        # Build HAVING clause
+        having_clause = self._build_having_clause(query_obj)
+
+        # Build ORDER BY clause
+        order_by_clause = self._build_order_by_clause(query_obj)
+
+        # Build LIMIT clause
+        limit_clause = self._build_limit_clause(query_obj)
+
+        # Assemble query
+        query_parts = [
+            f"SELECT {', '.join(str(expr) for expr in select_exprs)}",
+            f"FROM {from_clause}"
+        ]
+
+        if where_clause:
+            query_parts.append(f"WHERE {where_clause}")
+
+        if group_by_clause:
+            query_parts.append(f"GROUP BY {group_by_clause}")
+
+        if having_clause:
+            query_parts.append(f"HAVING {having_clause}")
+
+        if order_by_clause:
+            query_parts.append(f"ORDER BY {order_by_clause}")
+
+        if limit_clause:
+            query_parts.append(limit_clause)
+
+        return '\n'.join(query_parts)
+
+    def _build_where_clause(self, query_obj: QueryObject) -> str:
+        """Build WHERE clause from filters."""
+        where_conditions = []
+
+        # Add explicit WHERE clause
+        if query_obj.where:
+            where_conditions.append(f"({query_obj.where})")
+
+        # Add filters
+        for filter_obj in query_obj.filters or []:
+            condition = self._build_filter_condition(filter_obj)
+            if condition:
+                where_conditions.append(condition)
+
+        # Add time range filter
+        time_filter = self._build_time_filter(query_obj)
+        if time_filter:
+            where_conditions.append(time_filter)
+
+        return ' AND '.join(where_conditions) if where_conditions else ''
+
+    def _build_filter_condition(self, filter_obj: Dict[str, Any]) -> str:
+        """Build SQL condition from filter object."""
+        column = filter_obj.get('col')
+        operator = filter_obj.get('op')
+        value = filter_obj.get('val')
+
+        if not all([column, operator]):
+            return ''
+
+        col_obj = self.get_column(column)
+        if not col_obj:
+            return ''
+
+        # Build condition based on operator
+        if operator == 'in':
+            if isinstance(value, list) and value:
+                values = ', '.join(f"'{v}'" for v in value)
+                return f"{col_obj.get_sqla_col()} IN ({values})"
+        elif operator == 'not in':
+            if isinstance(value, list) and value:
+                values = ', '.join(f"'{v}'" for v in value)
+                return f"{col_obj.get_sqla_col()} NOT IN ({values})"
+        elif operator == '==':
+            return f"{col_obj.get_sqla_col()} = '{value}'"
+        elif operator == '!=':
+            return f"{col_obj.get_sqla_col()} != '{value}'"
+        elif operator == '>':
+            return f"{col_obj.get_sqla_col()} > '{value}'"
+        elif operator == '<':
+            return f"{col_obj.get_sqla_col()} < '{value}'"
+        elif operator == '>=':
+            return f"{col_obj.get_sqla_col()} >= '{value}'"
+        elif operator == '<=':
+            return f"{col_obj.get_sqla_col()} <= '{value}'"
+        elif operator == 'LIKE':
+            return f"{col_obj.get_sqla_col()} LIKE '{value}'"
+        elif operator == 'ILIKE':
+            return f"UPPER({col_obj.get_sqla_col()}) LIKE UPPER('{value}')"
+        elif operator == 'IS NULL':
+            return f"{col_obj.get_sqla_col()} IS NULL"
+        elif operator == 'IS NOT NULL':
+            return f"{col_obj.get_sqla_col()} IS NOT NULL"
+
+        return ''
+```
+
+## Caching Layer
+
+### Cache Key Generation
+```python
+# /superset/utils/cache_manager.py
+class CacheManager:
+    """Manages query result caching."""
+
+    def __init__(self, cache_instance, cache_default_timeout=86400):
+        self.cache = cache_instance
+        self.default_timeout = cache_default_timeout
+
+    def get_cache_key(self, query_obj: QueryObject, datasource_id: int,
+                     user_id: int = None, extra_context: Dict = None) -> str:
+        """Generate cache key for query."""
+
+        # Base cache data
+        cache_data = {
+            'query_obj': query_obj.to_dict(),
+            'datasource_id': datasource_id,
+            'superset_version': app.config.get('VERSION_STRING', '1.0')
+        }
+
+        # Add user context for RLS
+        if user_id:
+            cache_data['user_id'] = user_id
+
+        # Add extra context
+        if extra_context:
+            cache_data['extra_context'] = extra_context
+
+        # Generate hash
+        cache_str = json.dumps(cache_data, sort_keys=True, default=str)
+        return hashlib.md5(cache_str.encode('utf-8')).hexdigest()
+
+    def get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get cached query result."""
+        try:
+            cached_data = self.cache.get(cache_key)
+            if cached_data:
+                # Check if cache is still valid
+                if self._is_cache_valid(cached_data):
+                    return cached_data
+                else:
+                    # Remove invalid cache
+                    self.cache.delete(cache_key)
+            return None
+        except Exception as ex:
+            logger.warning(f"Cache retrieval failed: {ex}")
+            return None
+
+    def cache_result(self, cache_key: str, result: Dict[str, Any],
+                    timeout: int = None) -> None:
+        """Cache query result."""
+        try:
+            timeout = timeout or self.default_timeout
+
+            # Add cache metadata
+            cache_data = {
+                'result': result,
+                'cached_dttm': datetime.utcnow().isoformat(),
+                'cache_timeout': timeout,
+                'version': '1.0'
+            }
+
+            self.cache.set(cache_key, cache_data, timeout=timeout)
+
+        except Exception as ex:
+            logger.warning(f"Cache storage failed: {ex}")
+
+    def invalidate_cache(self, pattern: str) -> int:
+        """Invalidate cache entries matching pattern."""
+        try:
+            # Get all keys matching pattern
+            keys = self.cache.get_keys_by_pattern(pattern)
+
+            # Delete matching keys
+            if keys:
+                self.cache.delete_many(keys)
+                return len(keys)
+
+            return 0
+
+        except Exception as ex:
+            logger.warning(f"Cache invalidation failed: {ex}")
+            return 0
+
+    def _is_cache_valid(self, cached_data: Dict[str, Any]) -> bool:
+        """Check if cached data is still valid."""
+        try:
+            cached_dttm = datetime.fromisoformat(cached_data['cached_dttm'])
+            cache_timeout = cached_data.get('cache_timeout', self.default_timeout)
+
+            # Check if expired
+            if datetime.utcnow() > cached_dttm + timedelta(seconds=cache_timeout):
+                return False
+
+            # Check version compatibility
+            if cached_data.get('version') != '1.0':
+                return False
+
+            return True
+
+        except Exception:
+            return False
+```
+
+### Smart Cache Strategies
+```python
+# /superset/utils/smart_cache.py
+class SmartCacheStrategy:
+    """Intelligent caching strategies based on query characteristics."""
+
+    @staticmethod
+    def get_cache_timeout(query_obj: QueryObject, datasource: BaseDatasource) -> int:
+        """Calculate optimal cache timeout."""
+
+        # Base timeout
+        base_timeout = 3600  # 1 hour
+
+        # Adjust based on query characteristics
+
+        # 1. Time range affects cache duration
+        if query_obj.from_dttm and query_obj.to_dttm:
+            time_range = query_obj.to_dttm - query_obj.from_dttm
+
+            # Longer time ranges can be cached longer
+            if time_range.days > 30:
+                base_timeout *= 6  # 6 hours for monthly+ data
+            elif time_range.days > 7:
+                base_timeout *= 3  # 3 hours for weekly+ data
+            elif time_range.days > 1:
+                base_timeout *= 2  # 2 hours for daily+ data
+            else:
+                base_timeout //= 2  # 30 minutes for intraday data
+
+        # 2. Data freshness requirements
+        if hasattr(datasource, 'cache_timeout') and datasource.cache_timeout:
+            base_timeout = min(base_timeout, datasource.cache_timeout)
+
+        # 3. Query complexity affects cache value
+        complexity_score = SmartCacheStrategy._calculate_complexity(query_obj)
+        if complexity_score > 0.8:  # Very complex queries
+            base_timeout *= 2
+        elif complexity_score < 0.3:  # Simple queries
+            base_timeout //= 2
+
+        # 4. Historical vs real-time data
+        if SmartCacheStrategy._is_historical_query(query_obj):
+            base_timeout *= 4  # Historical data changes less frequently
+
+        return max(300, min(base_timeout, 86400))  # Between 5 minutes and 24 hours
+
+    @staticmethod
+    def _calculate_complexity(query_obj: QueryObject) -> float:
+        """Calculate query complexity score (0-1)."""
+        score = 0.0
+
+        # Count dimensions
+        dimensions = len(query_obj.groupby or []) + len(query_obj.columns or [])
+        score += min(dimensions / 10, 0.3)  # Max 0.3 for dimensions
+
+        # Count metrics
+        metrics = len(query_obj.metrics or [])
+        score += min(metrics / 5, 0.2)  # Max 0.2 for metrics
+
+        # Count filters
+        filters = len(query_obj.filters or [])
+        score += min(filters / 10, 0.2)  # Max 0.2 for filters
+
+        # Post-processing complexity
+        if query_obj.post_processing:
+            score += min(len(query_obj.post_processing) / 5, 0.3)  # Max 0.3 for post-processing
+
+        return min(score, 1.0)
+
+    @staticmethod
+    def _is_historical_query(query_obj: QueryObject) -> bool:
+        """Check if query is for historical data."""
+        if not query_obj.to_dttm:
+            return False
+
+        # Consider data older than 7 days as historical
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        return query_obj.to_dttm < cutoff
+
+    @staticmethod
+    def should_cache_query(query_obj: QueryObject, execution_time: float) -> bool:
+        """Determine if query results should be cached."""
+
+        # Always cache slow queries (>1 second)
+        if execution_time > 1.0:
+            return True
+
+        # Cache complex queries
+        if SmartCacheStrategy._calculate_complexity(query_obj) > 0.5:
+            return True
+
+        # Cache historical data queries
+        if SmartCacheStrategy._is_historical_query(query_obj):
+            return True
+
+        # Don't cache very fast, simple queries
+        if execution_time < 0.1 and SmartCacheStrategy._calculate_complexity(query_obj) < 0.2:
+            return False
+
+        return True
+```
+
+## Performance Monitoring
+
+### Query Performance Tracking
+```python
+# /superset/utils/query_monitor.py
+class QueryPerformanceMonitor:
+    """Monitor and track query performance."""
+
+    def __init__(self):
+        self.slow_query_threshold = 5.0  # seconds
+        self.metrics_client = get_metrics_client()
+
+    def track_query_execution(self, query_obj: QueryObject, datasource_id: int,
+                            execution_time: float, row_count: int) -> None:
+        """Track query execution metrics."""
+
+        # Record basic metrics
+        self.metrics_client.timing('query.execution_time', execution_time)
+        self.metrics_client.histogram('query.row_count', row_count)
+        self.metrics_client.incr('query.total_count')
+
+        # Track by datasource
+        self.metrics_client.timing(f'query.execution_time.datasource_{datasource_id}', execution_time)
+
+        # Track slow queries
+        if execution_time > self.slow_query_threshold:
+            self.metrics_client.incr('query.slow_queries')
+            self._log_slow_query(query_obj, datasource_id, execution_time)
+
+        # Track query complexity
+        complexity = self._calculate_query_complexity(query_obj)
+        self.metrics_client.histogram('query.complexity', complexity)
+
+        # Performance categorization
+        if execution_time < 0.5:
+            self.metrics_client.incr('query.performance.fast')
+        elif execution_time < 2.0:
+            self.metrics_client.incr('query.performance.medium')
+        else:
+            self.metrics_client.incr('query.performance.slow')
+
+    def _log_slow_query(self, query_obj: QueryObject, datasource_id: int,
+                       execution_time: float) -> None:
+        """Log slow query for analysis."""
+        logger.warning(
+            "Slow query detected",
+            extra={
+                'execution_time': execution_time,
+                'datasource_id': datasource_id,
+                'row_limit': query_obj.row_limit,
+                'groupby_count': len(query_obj.groupby or []),
+                'metrics_count': len(query_obj.metrics or []),
+                'filters_count': len(query_obj.filters or []),
+                'has_time_range': bool(query_obj.from_dttm and query_obj.to_dttm)
+            }
+        )
+
+    def get_performance_stats(self, datasource_id: int = None,
+                            hours: int = 24) -> Dict[str, Any]:
+        """Get query performance statistics."""
+        # This would typically query a metrics database
+        # For example purposes, showing the structure
+
+        stats = {
+            'total_queries': 0,
+            'avg_execution_time': 0.0,
+            'slow_queries': 0,
+            'cache_hit_rate': 0.0,
+            'performance_distribution': {
+                'fast': 0,
+                'medium': 0,
+                'slow': 0
+            }
+        }
+
+        # Implementation would depend on metrics backend
+        return stats
+```
+
+## Debugging & Troubleshooting
+
+### Query Debugging Tools
+```python
+# /superset/utils/query_debug.py
+class QueryDebugger:
+    """Tools for debugging query execution."""
+
+    @staticmethod
+    def explain_query(datasource: BaseDatasource, query_obj: QueryObject) -> Dict[str, Any]:
+        """Get query execution plan."""
+        try:
+            # Get SQL query
+            sql = datasource.get_query_str(query_obj)
+
+            # Get execution plan
+            engine = datasource.database.get_sqla_engine()
+            with engine.connect() as conn:
+                # Database-specific EXPLAIN
+                if 'postgresql' in str(engine.url):
+                    explain_sql = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}"
+                elif 'mysql' in str(engine.url):
+                    explain_sql = f"EXPLAIN FORMAT=JSON {sql}"
+                else:
+                    explain_sql = f"EXPLAIN {sql}"
+
+                result = conn.execute(text(explain_sql))
+                execution_plan = result.fetchall()
+
+                return {
+                    'sql': sql,
+                    'execution_plan': execution_plan,
+                    'database_type': str(engine.url).split('://')[0]
+                }
+
+        except Exception as ex:
+            return {
+                'error': str(ex),
+                'sql': sql if 'sql' in locals() else None
+            }
+
+    @staticmethod
+    def analyze_query_performance(query_obj: QueryObject, execution_time: float,
+                                row_count: int) -> Dict[str, Any]:
+        """Analyze query performance and suggest optimizations."""
+
+        analysis = {
+            'performance_score': 'good',
+            'issues': [],
+            'suggestions': []
+        }
+
+        # Performance scoring
+        if execution_time > 10:
+            analysis['performance_score'] = 'poor'
+        elif execution_time > 3:
+            analysis['performance_score'] = 'fair'
+
+        # Check for common issues
+
+        # 1. Large result sets
+        if row_count > 10000:
+            analysis['issues'].append('Large result set')
+            analysis['suggestions'].append('Consider adding filters or row limits')
+
+        # 2. Too many dimensions
+        dimension_count = len(query_obj.groupby or []) + len(query_obj.columns or [])
+        if dimension_count > 10:
+            analysis['issues'].append('High cardinality query')
+            analysis['suggestions'].append('Reduce number of dimensions')
+
+        # 3. No time filters on time-series data
+        if query_obj.granularity and not (query_obj.from_dttm and query_obj.to_dttm):
+            analysis['issues'].append('No time range specified')
+            analysis['suggestions'].append('Add time range filters')
+
+        # 4. Complex metrics
+        complex_metrics = [m for m in query_obj.metrics or [] if isinstance(m, dict)]
+        if len(complex_metrics) > 3:
+            analysis['issues'].append('Multiple complex metrics')
+            analysis['suggestions'].append('Consider simplifying metrics')
+
+        return analysis
+
+    @staticmethod
+    def get_query_lineage(datasource: BaseDatasource, query_obj: QueryObject) -> Dict[str, Any]:
+        """Get data lineage for query."""
+        lineage = {
+            'datasource': {
+                'id': datasource.id,
+                'name': datasource.name,
+                'type': datasource.__class__.__name__
+            },
+            'columns': [],
+            'metrics': [],
+            'filters': []
+        }
+
+        # Track column lineage
+        for column_name in query_obj.columns or []:
+            column = datasource.get_column(column_name)
+            if column:
+                lineage['columns'].append({
+                    'name': column.column_name,
+                    'type': column.type,
+                    'expression': column.expression
+                })
+
+        # Track metric lineage
+        for metric_name in query_obj.metrics or []:
+            metric = datasource.get_metric(metric_name)
+            if metric:
+                lineage['metrics'].append({
+                    'name': metric.metric_name,
+                    'expression': metric.expression,
+                    'metric_type': metric.metric_type
+                })
+
+        return lineage
+```
+
+## Best Practices
+
+### Query Optimization Guidelines
+1. **Use appropriate filters** - Always filter data at the source
+2. **Limit result sets** - Use row limits for large datasets
+3. **Optimize time ranges** - Use specific time ranges for time-series data
+4. **Cache strategically** - Cache expensive, stable queries
+5. **Monitor performance** - Track slow queries and optimize them
+
+### Security Considerations
+1. **Validate permissions** - Check access at multiple levels
+2. **Apply RLS consistently** - Ensure row-level security is always applied
+3. **Sanitize inputs** - Prevent SQL injection attacks
+4. **Audit access** - Log sensitive data access
+5. **Rate limiting** - Prevent query abuse
+
+### Performance Best Practices
+1. **Use database indexes** - Ensure proper indexing on filtered columns
+2. **Optimize joins** - Use efficient join strategies
+3. **Batch operations** - Process large datasets in batches
+4. **Connection pooling** - Reuse database connections
+5. **Query result pagination** - Paginate large result sets

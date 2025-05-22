@@ -1,0 +1,696 @@
+# Frontend Utilities Guide
+
+Complete guide to build tools, linting, formatting, and development utilities for the Superset frontend.
+
+## Build System
+
+### Webpack Configuration
+
+Superset uses **Webpack 5** with modern optimization features for both development and production builds.
+
+**Core Configuration (`webpack.config.js`):**
+```javascript
+const getWebpackConfig = () => {
+  const isDevMode = process.env.NODE_ENV === 'development';
+
+  return {
+    mode: isDevMode ? 'development' : 'production',
+
+    // Entry points
+    entry: {
+      preamble: './src/preamble.ts',
+      theme: './src/theme.ts',
+      main: './src/views/index.tsx',
+    },
+
+    // Output configuration
+    output: {
+      path: path.resolve('../superset/static/assets'),
+      publicPath: '/static/assets/',
+      filename: isDevMode ? '[name].js' : '[name].[contenthash].js',
+      chunkFilename: isDevMode ? '[name].chunk.js' : '[name].[contenthash].chunk.js',
+    },
+
+    // Optimization
+    optimization: {
+      splitChunks: {
+        chunks: 'all',
+        cacheGroups: {
+          vendor: {
+            test: /[\\/]node_modules[\\/]/,
+            name: 'vendors',
+            chunks: 'all',
+          },
+        },
+      },
+    },
+  };
+};
+```
+
+**Development Server:**
+```javascript
+devServer: {
+  hot: true,
+  port: 9000,
+  host: 'localhost',
+  historyApiFallback: true,
+  allowedHosts: 'all',
+
+  // Proxy API requests to backend
+  proxy: {
+    '/api/*': {
+      target: 'http://localhost:8088',
+      changeOrigin: true,
+    },
+    '/static/appbuilder/*': {
+      target: 'http://localhost:8088',
+      changeOrigin: true,
+    },
+  },
+
+  // Performance optimizations
+  client: {
+    overlay: { warnings: false, errors: true },
+  },
+}
+```
+
+### Build Commands
+
+**Development Build:**
+```bash
+# Fast development build with hot reload
+npm run dev
+
+# Development server with proxy
+npm run dev-server
+
+# Webpack watch mode
+npm run build-dev
+```
+
+**Production Build:**
+```bash
+# Optimized production bundle
+npm run build
+
+# Production build with instrumentation for testing
+npm run build-instrumented
+
+# Bundle analysis
+BUNDLE_ANALYZER=true npm run build
+```
+
+**Key Build Features:**
+- **Code Splitting**: Automatic chunk splitting for optimal loading
+- **Tree Shaking**: Eliminates unused code
+- **Asset Optimization**: Images, fonts, and CSS optimization
+- **Source Maps**: Development debugging support
+
+### Bundle Optimization
+
+**Chunk Strategy:**
+```javascript
+optimization: {
+  splitChunks: {
+    chunks: 'all',
+    cacheGroups: {
+      // Vendor libraries
+      vendor: {
+        test: /[\\/]node_modules[\\/]/,
+        name: 'vendors',
+        chunks: 'all',
+        enforce: true,
+      },
+
+      // Large libraries
+      charts: {
+        test: /[\\/]node_modules[\\/](echarts|d3)/,
+        name: 'charts',
+        chunks: 'all',
+        priority: 20,
+      },
+
+      // Common utilities
+      common: {
+        minChunks: 2,
+        name: 'common',
+        chunks: 'all',
+        priority: 10,
+      },
+    },
+  },
+}
+```
+
+**Performance Monitoring:**
+```bash
+# Bundle size analysis
+npm run bundle-stats
+
+# Performance measurement
+npx webpack-bundle-analyzer dist/static/assets/statistics.json
+```
+
+## TypeScript Configuration
+
+### Strict TypeScript Setup
+
+**Main Configuration (`tsconfig.json`):**
+```json
+{
+  "compilerOptions": {
+    /* Type Checking */
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "noUnusedLocals": true,
+    "strictNullChecks": true,
+
+    /* Module Resolution */
+    "baseUrl": ".",
+    "module": "esnext",
+    "moduleResolution": "node",
+    "paths": {
+      "@superset-ui/core": ["./packages/superset-ui-core/src"],
+      "@superset-ui/chart-controls": ["./packages/superset-ui-chart-controls/src"],
+      "@superset-ui/plugin-chart-*": ["./plugins/plugin-chart-*/src"]
+    },
+
+    /* Emit */
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+
+    /* Language Features */
+    "target": "esnext",
+    "jsx": "preserve",
+    "lib": ["dom", "dom.iterable", "esnext"]
+  },
+
+  "include": [
+    "./src/**/*",
+    "./packages/*/src/**/*",
+    "./plugins/*/src/**/*",
+    "./spec/**/*"
+  ]
+}
+```
+
+### Type Checking Commands
+
+```bash
+# Full type checking
+npm run type
+
+# Type checking with watch mode
+npx tsc --noEmit --watch
+
+# Type checking specific files
+npx tsc --noEmit src/components/MyComponent.tsx
+```
+
+**Path Mapping Benefits:**
+- Clean import statements
+- IDE autocomplete and navigation
+- Refactoring safety
+- Consistent module resolution
+
+## ESLint Configuration
+
+### Comprehensive Linting Setup
+
+**ESLint Configuration (`.eslintrc.js`):**
+```javascript
+module.exports = {
+  extends: [
+    'airbnb',
+    'airbnb/hooks',
+    'prettier',
+    '@typescript-eslint/recommended',
+  ],
+
+  plugins: [
+    'i18n-strings',
+    'theme-colors',
+    'icons',
+    'jest-dom',
+    'testing-library',
+  ],
+
+  rules: {
+    // Custom Superset rules
+    'i18n-strings/no-template-vars': 'error',
+    'theme-colors/no-hardcoded-colors': 'error',
+    'icons/no-fontawesome': 'warn',
+
+    // React/TypeScript rules
+    'react/jsx-props-no-spreading': 'off',
+    'react/require-default-props': 'off',
+    '@typescript-eslint/no-unused-vars': ['error', {
+      argsIgnorePattern: '^_'
+    }],
+
+    // Import organization
+    'import/order': ['error', {
+      'groups': [
+        'builtin',
+        'external',
+        'internal',
+        'parent',
+        'sibling',
+        'index'
+      ],
+      'newlines-between': 'always',
+    }],
+  },
+
+  overrides: [
+    // Test files
+    {
+      files: ['**/*.test.*', '**/spec/**/*'],
+      env: { jest: true },
+      rules: {
+        'import/no-extraneous-dependencies': 'off',
+      },
+    },
+  ],
+};
+```
+
+### Custom ESLint Rules
+
+**Internationalization Rule (`eslint-rules/eslint-plugin-i18n-strings`):**
+```javascript
+// Prevents template variables in translation strings
+module.exports = {
+  rules: {
+    'no-template-vars': {
+      create(context) {
+        return {
+          CallExpression(node) {
+            if (node.callee.name === 't' && node.arguments[0]) {
+              const firstArg = node.arguments[0];
+              if (firstArg.type === 'TemplateLiteral') {
+                context.report({
+                  node: firstArg,
+                  message: 'Template literals not allowed in translation strings'
+                });
+              }
+            }
+          }
+        };
+      }
+    }
+  }
+};
+```
+
+**Theme Colors Rule (`eslint-rules/eslint-plugin-theme-colors`):**
+```javascript
+// Prevents hardcoded colors, enforces theme usage
+module.exports = {
+  rules: {
+    'no-hardcoded-colors': {
+      create(context) {
+        const colorRegex = /#[0-9a-fA-F]{3,6}|rgb\(|rgba\(/;
+
+        return {
+          Literal(node) {
+            if (typeof node.value === 'string' && colorRegex.test(node.value)) {
+              context.report({
+                node,
+                message: 'Use theme colors instead of hardcoded values'
+              });
+            }
+          }
+        };
+      }
+    }
+  }
+};
+```
+
+### Linting Commands
+
+```bash
+# Full linting (ESLint + TypeScript)
+npm run lint
+
+# ESLint only
+npm run eslint -- .
+
+# Auto-fix issues
+npm run lint-fix
+
+# Lint specific files
+npm run eslint -- src/components/MyComponent.tsx
+
+# Lint with performance metrics
+npm run lint-stats
+```
+
+## Code Formatting
+
+### Prettier Configuration
+
+**Prettier Setup (`prettier.config.js`):**
+```javascript
+module.exports = {
+  semi: true,
+  singleQuote: true,
+  trailingComma: 'es5',
+  tabWidth: 2,
+  useTabs: false,
+  printWidth: 80,
+  arrowParens: 'avoid',
+  endOfLine: 'lf',
+
+  // Import organization
+  importOrder: [
+    '^react$',
+    '^@(.*)$',
+    '^[./]',
+  ],
+  importOrderSeparation: true,
+  importOrderSortSpecifiers: true,
+};
+```
+
+**Formatting Commands:**
+```bash
+# Format all files
+npm run format
+
+# Check formatting only
+npm run prettier-check
+
+# Format specific files
+npx prettier --write src/components/MyComponent.tsx
+
+# Format on save (VS Code setting)
+"editor.formatOnSave": true
+```
+
+### Pre-commit Hooks
+
+**Pre-commit Configuration (`.pre-commit-config.yaml`):**
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint
+        entry: npm run eslint
+        language: system
+        files: \.(js|jsx|ts|tsx)$
+        args: [--fix]
+
+      - id: prettier
+        name: Prettier
+        entry: npm run prettier
+        language: system
+        files: \.(js|jsx|ts|tsx|css|less|scss|json|md)$
+
+      - id: typescript
+        name: TypeScript
+        entry: npm run type
+        language: system
+        files: \.(ts|tsx)$
+        pass_filenames: false
+```
+
+**Setup Pre-commit:**
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install hooks
+pre-commit install
+
+# Run manually
+pre-commit run --all-files
+```
+
+## Development Tools
+
+### Storybook Configuration
+
+**Storybook Setup (`.storybook/main.js`):**
+```javascript
+module.exports = {
+  stories: [
+    '../src/components/**/*.stories.@(js|jsx|ts|tsx|mdx)',
+    '../packages/**/src/**/*.stories.@(js|jsx|ts|tsx|mdx)',
+    '../plugins/**/src/**/*.stories.@(js|jsx|ts|tsx|mdx)',
+  ],
+
+  addons: [
+    '@storybook/addon-essentials',
+    '@storybook/addon-controls',
+    '@storybook/addon-actions',
+    '@storybook/addon-links',
+  ],
+
+  webpackFinal: async (config) => {
+    // Inherit webpack aliases from main config
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@superset-ui/core': path.resolve('./packages/superset-ui-core/src'),
+    };
+
+    return config;
+  },
+};
+```
+
+**Storybook Commands:**
+```bash
+# Start Storybook dev server
+npm run storybook
+
+# Build static Storybook
+npm run build-storybook
+
+# Component-specific stories
+npm run plugins:storybook
+```
+
+### VS Code Integration
+
+**Workspace Settings (`.vscode/settings.json`):**
+```json
+{
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true,
+    "source.organizeImports": true
+  },
+
+  "typescript.preferences.importModuleSpecifier": "relative",
+  "typescript.suggest.autoImports": true,
+
+  "files.associations": {
+    "*.css": "css",
+    "*.less": "less"
+  },
+
+  "emmet.includeLanguages": {
+    "typescript": "html",
+    "typescriptreact": "html"
+  }
+}
+```
+
+**Recommended Extensions:**
+- ESLint
+- Prettier
+- TypeScript Importer
+- Auto Rename Tag
+- Bracket Pair Colorizer
+
+### Performance Tools
+
+**Bundle Analysis:**
+```bash
+# Webpack Bundle Analyzer
+BUNDLE_ANALYZER=true npm run build
+
+# Bundle size tracking
+npm run bundle-stats
+
+# Performance profiling
+NODE_ENV=production npm run build
+```
+
+**Memory Profiling:**
+```javascript
+// Memory usage monitoring
+if (process.env.NODE_ENV === 'development') {
+  const memUsage = process.memoryUsage();
+  console.log('Memory usage:', {
+    rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
+    heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+  });
+}
+```
+
+## Testing Utilities
+
+### Jest Configuration
+
+**Jest Setup (`jest.config.js`):**
+```javascript
+module.exports = {
+  // Test environment
+  testEnvironment: 'jsdom',
+  setupFilesAfterEnv: ['<rootDir>/spec/helpers/setup.ts'],
+
+  // Module resolution
+  moduleNameMapping: {
+    '^src/(.*)$': '<rootDir>/src/$1',
+    '@superset-ui/(.*)$': '<rootDir>/packages/superset-ui-$1/src',
+  },
+
+  // Transform configuration
+  transform: {
+    '^.+\\.(js|jsx|ts|tsx)$': 'babel-jest',
+  },
+
+  // Coverage configuration
+  collectCoverageFrom: [
+    'src/**/*.{js,jsx,ts,tsx}',
+    'packages/**/src/**/*.{js,jsx,ts,tsx}',
+    '!**/*.stories.*',
+  ],
+
+  // Performance
+  maxWorkers: '80%',
+  testTimeout: 20000,
+};
+```
+
+### Testing Commands
+
+```bash
+# Run all tests
+npm run test
+
+# Watch mode for TDD
+npm run tdd
+
+# Coverage report
+npm run cover
+
+# Test specific files
+npm test -- ComponentName.test.tsx
+
+# Test with pattern matching
+npm test -- --testNamePattern="should render"
+
+# Update snapshots
+npm test -- --updateSnapshot
+```
+
+## Build Scripts
+
+### Custom Build Scripts
+
+**Webpack Build Script (`scripts/build.js`):**
+```javascript
+const webpack = require('webpack');
+const chalk = require('chalk');
+const getWebpackConfig = require('../webpack.config');
+
+process.env.NODE_ENV = 'production';
+
+console.log(chalk.blue('Building production bundle...'));
+
+const config = getWebpackConfig();
+const compiler = webpack(config);
+
+compiler.run((err, stats) => {
+  if (err) {
+    console.error(chalk.red('Build failed with errors.'));
+    console.error(err.stack || err);
+    process.exit(1);
+  }
+
+  if (stats.hasErrors()) {
+    console.error(chalk.red('Build completed with errors.'));
+    stats.compilation.errors.forEach(error => {
+      console.error(error.message);
+    });
+    process.exit(1);
+  }
+
+  console.log(chalk.green('Build completed successfully!'));
+
+  // Print build statistics
+  console.log(stats.toString({
+    colors: true,
+    modules: false,
+    children: false,
+    chunks: false,
+    chunkModules: false,
+  }));
+});
+```
+
+**Asset Copy Script (`scripts/copyAssets.js`):**
+```javascript
+const fs = require('fs-extra');
+const path = require('path');
+const glob = require('fast-glob');
+
+const copyAssets = async () => {
+  const packages = await glob('packages/*/package.json');
+
+  for (const pkg of packages) {
+    const packageDir = path.dirname(pkg);
+    const assetsDir = path.join(packageDir, 'assets');
+
+    if (await fs.pathExists(assetsDir)) {
+      const targetDir = path.join('dist', packageDir, 'assets');
+      await fs.copy(assetsDir, targetDir);
+      console.log(`Copied assets: ${assetsDir} -> ${targetDir}`);
+    }
+  }
+};
+
+copyAssets().catch(console.error);
+```
+
+## Best Practices
+
+### Code Quality
+
+1. **Consistent Linting**: Use ESLint with strict rules
+2. **Type Safety**: Enable strict TypeScript checking
+3. **Code Formatting**: Use Prettier for consistent style
+4. **Pre-commit Hooks**: Automate quality checks
+
+### Performance
+
+1. **Bundle Analysis**: Monitor bundle size regularly
+2. **Code Splitting**: Implement route and component-based splitting
+3. **Tree Shaking**: Ensure unused code elimination
+4. **Compression**: Enable gzip/brotli compression
+
+### Development Experience
+
+1. **Hot Reload**: Fast development feedback
+2. **Source Maps**: Debugging support
+3. **Type Checking**: IDE integration and autocomplete
+4. **Error Overlay**: Clear error messages
+
+### Maintenance
+
+1. **Dependency Updates**: Regular security and performance updates
+2. **Build Optimization**: Continuous performance monitoring
+3. **Documentation**: Keep tooling documentation current
+4. **Team Standards**: Consistent development practices
+
+This comprehensive utilities guide ensures efficient, high-quality development with modern tooling and best practices.

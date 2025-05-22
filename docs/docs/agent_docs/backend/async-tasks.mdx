@@ -1,0 +1,920 @@
+# Async Tasks & Background Processing
+
+Superset uses Celery for background task processing, including reports, alerts, cache warming, and data processing. This guide covers implementation patterns, monitoring, and best practices.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────┐
+│            Web Application                  │
+│     (Flask/Superset Backend)               │
+├─────────────────────────────────────────────┤
+│              Message Broker                 │
+│        (Redis/RabbitMQ/SQS)                │
+├─────────────────────────────────────────────┤
+│             Celery Workers                  │
+│      (Background Task Execution)           │
+├─────────────────────────────────────────────┤
+│             Result Backend                  │
+│         (Redis/Database)                   │
+└─────────────────────────────────────────────┘
+```
+
+## Celery Configuration
+
+### Basic Setup
+```python
+# /superset/tasks/celery_app.py
+from celery import Celery
+from superset import app
+
+# Create Celery instance
+celery_app = Celery(app.import_name)
+
+# Configuration
+celery_app.conf.update(
+    broker_url=app.config['CELERY_CONFIG']['broker_url'],
+    result_backend=app.config['CELERY_CONFIG']['result_backend'],
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone='UTC',
+    enable_utc=True,
+
+    # Task routing
+    task_routes={
+        'superset.tasks.cache.*': {'queue': 'cache'},
+        'superset.tasks.reports.*': {'queue': 'reports'},
+        'superset.tasks.alerts.*': {'queue': 'alerts'},
+    },
+
+    # Result expiration
+    result_expires=3600,
+
+    # Task time limits
+    task_soft_time_limit=300,  # 5 minutes
+    task_time_limit=600,       # 10 minutes
+
+    # Worker configuration
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    worker_max_tasks_per_child=1000,
+)
+
+# Import tasks to register them
+from superset.tasks import cache, reports, alerts, thumbnails
+```
+
+### Production Configuration
+```python
+# superset_config.py - Production settings
+CELERY_CONFIG = {
+    'broker_url': 'redis://redis:6379/0',
+    'result_backend': 'redis://redis:6379/1',
+
+    # High availability
+    'broker_transport_options': {
+        'master_name': 'mymaster',
+        'sentinel_kwargs': {'password': 'password'},
+    },
+
+    # Monitoring
+    'worker_send_task_events': True,
+    'task_send_sent_event': True,
+    'worker_hijack_root_logger': False,
+
+    # Security
+    'worker_disable_rate_limits': False,
+    'task_reject_on_worker_lost': True,
+
+    # Performance
+    'task_compression': 'gzip',
+    'result_compression': 'gzip',
+    'broker_connection_retry_on_startup': True,
+}
+
+# Beat schedule for periodic tasks
+CELERY_BEAT_SCHEDULE = {
+    'cache-warmup': {
+        'task': 'superset.tasks.cache.warm_up_cache',
+        'schedule': crontab(minute=0, hour='*/6'),  # Every 6 hours
+    },
+    'cleanup-logs': {
+        'task': 'superset.tasks.scheduler.cleanup_old_logs',
+        'schedule': crontab(minute=30, hour=2),  # Daily at 2:30 AM
+    },
+    'thumbnail-generation': {
+        'task': 'superset.tasks.thumbnails.cache_dashboard_thumbnails',
+        'schedule': crontab(minute=0, hour=1),  # Daily at 1 AM
+    },
+}
+```
+
+## Creating Background Tasks
+
+### Basic Task Pattern
+```python
+# /superset/tasks/example.py
+from celery import current_task
+from superset.tasks.celery_app import celery_app
+from superset.extensions import db
+import logging
+
+logger = logging.getLogger(__name__)
+
+@celery_app.task(bind=True, name='process_data')
+def process_data_task(self, data_id: int, options: dict = None) -> dict:
+    """
+    Process data in background.
+
+    Args:
+        data_id: ID of data to process
+        options: Processing options
+
+    Returns:
+        dict with processing results
+    """
+    try:
+        # Update task state
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 0, 'total': 100, 'status': 'Starting...'}
+        )
+
+        # Get data
+        data = get_data_by_id(data_id)
+        if not data:
+            raise ValueError(f"Data {data_id} not found")
+
+        # Process in chunks
+        total_items = len(data.items)
+        processed_items = []
+
+        for i, item in enumerate(data.items):
+            # Update progress
+            self.update_state(
+                state='PROGRESS',
+                meta={
+                    'current': i + 1,
+                    'total': total_items,
+                    'status': f'Processing item {i + 1}/{total_items}'
+                }
+            )
+
+            # Process item
+            processed_item = process_single_item(item, options)
+            processed_items.append(processed_item)
+
+            # Commit periodically to avoid long transactions
+            if (i + 1) % 100 == 0:
+                db.session.commit()
+
+        # Final commit
+        db.session.commit()
+
+        return {
+            'status': 'completed',
+            'processed_count': len(processed_items),
+            'results': processed_items
+        }
+
+    except Exception as exc:
+        logger.exception(f"Task failed: {exc}")
+        self.update_state(
+            state='FAILURE',
+            meta={'error': str(exc), 'traceback': traceback.format_exc()}
+        )
+        raise
+```
+
+### Advanced Task with Retry Logic
+```python
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60})
+def robust_data_sync(self, source_id: int, target_id: int) -> dict:
+    """
+    Sync data between sources with automatic retry.
+    """
+    try:
+        # Exponential backoff for retries
+        retry_count = self.request.retries
+        if retry_count > 0:
+            delay = min(300, (2 ** retry_count) * 60)  # Max 5 minutes
+            logger.info(f"Retrying task after {delay} seconds (attempt {retry_count + 1})")
+            time.sleep(delay)
+
+        # Perform sync
+        source = DataSource.query.get(source_id)
+        target = DataSource.query.get(target_id)
+
+        if not source or not target:
+            raise ValueError("Invalid source or target")
+
+        # Check if already in progress
+        lock_key = f"sync_{source_id}_{target_id}"
+        if not acquire_lock(lock_key, timeout=3600):
+            raise Exception("Sync already in progress")
+
+        try:
+            sync_result = perform_sync(source, target)
+            return sync_result
+        finally:
+            release_lock(lock_key)
+
+    except Exception as exc:
+        if self.request.retries < 3:
+            logger.warning(f"Task failed, retrying: {exc}")
+            raise self.retry(countdown=60 * (2 ** self.request.retries))
+        else:
+            logger.error(f"Task failed after all retries: {exc}")
+            raise
+```
+
+### Task Chaining and Workflows
+```python
+from celery import chain, group, chord
+
+@celery_app.task
+def extract_data(source_id: int) -> dict:
+    """Extract data from source."""
+    source = DataSource.query.get(source_id)
+    data = source.extract()
+    return {'data': data, 'source_id': source_id}
+
+@celery_app.task
+def transform_data(extracted_data: dict) -> dict:
+    """Transform extracted data."""
+    data = extracted_data['data']
+    transformed = apply_transformations(data)
+    return {
+        'data': transformed,
+        'source_id': extracted_data['source_id'],
+        'transformed_at': datetime.utcnow().isoformat()
+    }
+
+@celery_app.task
+def load_data(transformed_data: dict) -> dict:
+    """Load transformed data to destination."""
+    data = transformed_data['data']
+    target = DataTarget.query.get(transformed_data['source_id'])
+    result = target.load(data)
+    return {
+        'loaded_count': result['count'],
+        'loaded_at': datetime.utcnow().isoformat()
+    }
+
+# ETL Pipeline with error handling
+@celery_app.task
+def run_etl_pipeline(source_ids: list[int]) -> dict:
+    """Run complete ETL pipeline for multiple sources."""
+
+    # Create workflow
+    workflow = chord(
+        # Extract from all sources in parallel
+        group(extract_data.s(source_id) for source_id in source_ids),
+
+        # Then transform and load in sequence
+        chain(
+            transform_data.s(),
+            load_data.s()
+        )
+    )
+
+    # Execute workflow
+    result = workflow.apply_async()
+    return {'workflow_id': result.id}
+
+# Usage
+def trigger_etl():
+    """Trigger ETL pipeline from API."""
+    task = run_etl_pipeline.delay([1, 2, 3, 4])
+    return task.id
+```
+
+## Real-World Task Examples
+
+### Cache Warming Task
+```python
+# /superset/tasks/cache.py
+@celery_app.task(bind=True, soft_time_limit=1800)  # 30 minutes
+def warm_up_cache(self, chart_ids: list[int] = None,
+                  dashboard_ids: list[int] = None) -> dict:
+    """
+    Warm up cache for charts and dashboards.
+    """
+    results = {
+        'charts': {'success': [], 'failed': []},
+        'dashboards': {'success': [], 'failed': []},
+        'total_time': 0
+    }
+
+    start_time = time.time()
+
+    try:
+        # Warm chart caches
+        if chart_ids:
+            for i, chart_id in enumerate(chart_ids):
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'current': i + 1,
+                        'total': len(chart_ids),
+                        'stage': 'warming_charts'
+                    }
+                )
+
+                try:
+                    chart = ChartDAO.find_by_id(chart_id)
+                    if chart and chart.query_context:
+                        command = ChartDataCommand(chart, json.loads(chart.query_context))
+                        command.run()
+                        results['charts']['success'].append(chart_id)
+                except Exception as ex:
+                    logger.warning(f"Failed to warm chart {chart_id}: {ex}")
+                    results['charts']['failed'].append({
+                        'chart_id': chart_id,
+                        'error': str(ex)
+                    })
+
+        # Warm dashboard caches
+        if dashboard_ids:
+            for dashboard_id in dashboard_ids:
+                try:
+                    dashboard = DashboardDAO.find_by_id(dashboard_id)
+                    if dashboard:
+                        # Warm all charts in dashboard
+                        for chart in dashboard.slices:
+                            if chart.query_context:
+                                command = ChartDataCommand(chart, json.loads(chart.query_context))
+                                command.run()
+                        results['dashboards']['success'].append(dashboard_id)
+                except Exception as ex:
+                    logger.warning(f"Failed to warm dashboard {dashboard_id}: {ex}")
+                    results['dashboards']['failed'].append({
+                        'dashboard_id': dashboard_id,
+                        'error': str(ex)
+                    })
+
+        results['total_time'] = time.time() - start_time
+        return results
+
+    except Exception as exc:
+        logger.exception("Cache warming failed")
+        raise
+```
+
+### Report Generation Task
+```python
+# /superset/tasks/reports.py
+@celery_app.task(bind=True, soft_time_limit=600)
+def generate_report(self, report_id: int, execution_id: str) -> dict:
+    """
+    Generate and deliver a scheduled report.
+    """
+    try:
+        # Get report configuration
+        report = ReportScheduleDAO.find_by_id(report_id)
+        if not report:
+            raise ValueError(f"Report {report_id} not found")
+
+        # Update execution status
+        execution = ReportExecutionDAO.find_by_id(execution_id)
+        execution.state = ReportState.WORKING
+        db.session.commit()
+
+        # Generate report content
+        self.update_state(state='PROGRESS', meta={'status': 'Generating content'})
+
+        if report.type == ReportDataFormat.VISUALIZATION:
+            content = generate_chart_report(report)
+        elif report.type == ReportDataFormat.DATA:
+            content = generate_data_report(report)
+        else:
+            raise ValueError(f"Unsupported report type: {report.type}")
+
+        # Deliver report
+        self.update_state(state='PROGRESS', meta={'status': 'Delivering report'})
+
+        delivery_results = []
+        for recipient in report.recipients:
+            try:
+                if recipient.type == ReportRecipientType.EMAIL:
+                    send_email_report(recipient.recipient, content, report)
+                elif recipient.type == ReportRecipientType.SLACK:
+                    send_slack_report(recipient.recipient, content, report)
+
+                delivery_results.append({
+                    'recipient': recipient.recipient,
+                    'status': 'success'
+                })
+            except Exception as ex:
+                delivery_results.append({
+                    'recipient': recipient.recipient,
+                    'status': 'failed',
+                    'error': str(ex)
+                })
+
+        # Update execution status
+        execution.state = ReportState.SUCCESS
+        execution.end_dttm = datetime.utcnow()
+        db.session.commit()
+
+        return {
+            'report_id': report_id,
+            'execution_id': execution_id,
+            'deliveries': delivery_results
+        }
+
+    except Exception as exc:
+        logger.exception(f"Report generation failed: {exc}")
+
+        # Update execution status
+        execution.state = ReportState.ERROR
+        execution.error_message = str(exc)
+        execution.end_dttm = datetime.utcnow()
+        db.session.commit()
+
+        raise
+
+def generate_chart_report(report: ReportSchedule) -> bytes:
+    """Generate chart screenshot for report."""
+    # Implementation for chart screenshot generation
+    pass
+
+def generate_data_report(report: ReportSchedule) -> bytes:
+    """Generate data export for report."""
+    # Implementation for data export
+    pass
+```
+
+### Alert Processing Task
+```python
+# /superset/tasks/alerts.py
+@celery_app.task(bind=True)
+def process_alert(self, alert_id: int) -> dict:
+    """
+    Process an alert check and send notifications if triggered.
+    """
+    try:
+        alert = AlertDAO.find_by_id(alert_id)
+        if not alert or not alert.active:
+            return {'status': 'skipped', 'reason': 'Alert not found or inactive'}
+
+        # Execute alert query
+        self.update_state(state='PROGRESS', meta={'status': 'Executing query'})
+
+        query_result = execute_alert_query(alert)
+
+        # Check alert condition
+        self.update_state(state='PROGRESS', meta={'status': 'Checking condition'})
+
+        triggered = check_alert_condition(alert, query_result)
+
+        if triggered:
+            # Send notifications
+            self.update_state(state='PROGRESS', meta={'status': 'Sending notifications'})
+
+            notification_results = []
+            for recipient in alert.recipients:
+                try:
+                    send_alert_notification(recipient, alert, query_result)
+                    notification_results.append({
+                        'recipient': recipient.recipient,
+                        'status': 'sent'
+                    })
+                except Exception as ex:
+                    notification_results.append({
+                        'recipient': recipient.recipient,
+                        'status': 'failed',
+                        'error': str(ex)
+                    })
+
+            # Log alert trigger
+            AlertLogDAO.create({
+                'alert_id': alert_id,
+                'state': AlertState.TRIGGERED,
+                'dttm': datetime.utcnow(),
+                'value': query_result.get('value'),
+                'error_message': None
+            })
+
+            return {
+                'status': 'triggered',
+                'notifications': notification_results,
+                'value': query_result.get('value')
+            }
+        else:
+            # Log successful check
+            AlertLogDAO.create({
+                'alert_id': alert_id,
+                'state': AlertState.PASS,
+                'dttm': datetime.utcnow(),
+                'value': query_result.get('value'),
+                'error_message': None
+            })
+
+            return {
+                'status': 'passed',
+                'value': query_result.get('value')
+            }
+
+    except Exception as exc:
+        logger.exception(f"Alert processing failed: {exc}")
+
+        # Log error
+        AlertLogDAO.create({
+            'alert_id': alert_id,
+            'state': AlertState.ERROR,
+            'dttm': datetime.utcnow(),
+            'error_message': str(exc)
+        })
+
+        raise
+```
+
+## Task Monitoring & Management
+
+### Task Status Tracking
+```python
+# /superset/utils/task_manager.py
+from celery.result import AsyncResult
+from celery.exceptions import Retry
+
+class TaskManager:
+    """Utilities for managing and monitoring Celery tasks."""
+
+    @staticmethod
+    def get_task_status(task_id: str) -> dict:
+        """Get comprehensive task status."""
+        result = AsyncResult(task_id)
+
+        status = {
+            'task_id': task_id,
+            'state': result.state,
+            'ready': result.ready(),
+            'successful': result.successful() if result.ready() else None,
+            'failed': result.failed() if result.ready() else None,
+        }
+
+        if result.state == 'PROGRESS':
+            status.update(result.info or {})
+        elif result.state == 'SUCCESS':
+            status['result'] = result.result
+        elif result.state == 'FAILURE':
+            status['error'] = str(result.info)
+            status['traceback'] = getattr(result.info, 'traceback', None)
+
+        return status
+
+    @staticmethod
+    def cancel_task(task_id: str) -> bool:
+        """Cancel a running task."""
+        result = AsyncResult(task_id)
+        if not result.ready():
+            result.revoke(terminate=True)
+            return True
+        return False
+
+    @staticmethod
+    def get_active_tasks() -> list[dict]:
+        """Get list of currently active tasks."""
+        inspect = celery_app.control.inspect()
+        active_tasks = inspect.active()
+
+        if not active_tasks:
+            return []
+
+        all_tasks = []
+        for worker, tasks in active_tasks.items():
+            for task in tasks:
+                all_tasks.append({
+                    'worker': worker,
+                    'task_id': task['id'],
+                    'name': task['name'],
+                    'args': task['args'],
+                    'kwargs': task['kwargs'],
+                    'time_start': task['time_start']
+                })
+
+        return all_tasks
+
+    @staticmethod
+    def get_task_history(limit: int = 100) -> list[dict]:
+        """Get recent task execution history."""
+        # Implementation depends on result backend
+        # For Redis backend:
+        history = []
+        # Query Redis for recent task results
+        return history
+```
+
+### Task Monitoring API
+```python
+# /superset/tasks/api.py
+from flask import Blueprint, request, jsonify
+from flask_appbuilder.api import expose, protect, safe
+
+tasks_bp = Blueprint('tasks', __name__, url_prefix='/api/v1/tasks')
+
+class TaskRestApi(BaseSupersetApi):
+    """API for task management and monitoring."""
+
+    @expose('/<task_id>/status', methods=['GET'])
+    @protect()
+    @safe
+    def get_task_status(self, task_id: str) -> Response:
+        """Get task status and progress."""
+        try:
+            status = TaskManager.get_task_status(task_id)
+            return self.response(200, result=status)
+        except Exception as ex:
+            return self.response_500(message=str(ex))
+
+    @expose('/<task_id>/cancel', methods=['POST'])
+    @protect()
+    @safe
+    def cancel_task(self, task_id: str) -> Response:
+        """Cancel a running task."""
+        try:
+            cancelled = TaskManager.cancel_task(task_id)
+            if cancelled:
+                return self.response(200, message="Task cancelled")
+            else:
+                return self.response_400(message="Task cannot be cancelled")
+        except Exception as ex:
+            return self.response_500(message=str(ex))
+
+    @expose('/active', methods=['GET'])
+    @protect()
+    @safe
+    def get_active_tasks(self) -> Response:
+        """Get list of active tasks."""
+        try:
+            tasks = TaskManager.get_active_tasks()
+            return self.response(200, result=tasks)
+        except Exception as ex:
+            return self.response_500(message=str(ex))
+
+    @expose('/history', methods=['GET'])
+    @protect()
+    @safe
+    def get_task_history(self) -> Response:
+        """Get task execution history."""
+        try:
+            limit = request.args.get('limit', 100, type=int)
+            history = TaskManager.get_task_history(limit)
+            return self.response(200, result=history)
+        except Exception as ex:
+            return self.response_500(message=str(ex))
+```
+
+## Error Handling & Debugging
+
+### Task Debugging
+```python
+# /superset/tasks/debug.py
+import logging
+import traceback
+from functools import wraps
+
+def debug_task(func):
+    """Decorator to add debugging capabilities to tasks."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        task_id = self.request.id
+        logger = logging.getLogger(f"celery.task.{func.__name__}")
+
+        logger.info(f"Starting task {task_id} with args={args}, kwargs={kwargs}")
+
+        try:
+            result = func(self, *args, **kwargs)
+            logger.info(f"Task {task_id} completed successfully")
+            return result
+        except Exception as exc:
+            logger.error(f"Task {task_id} failed: {exc}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Store debug info in result backend
+            self.update_state(
+                state='FAILURE',
+                meta={
+                    'error': str(exc),
+                    'traceback': traceback.format_exc(),
+                    'args': args,
+                    'kwargs': kwargs,
+                    'task_name': func.__name__
+                }
+            )
+            raise
+
+    return wrapper
+
+# Usage
+@celery_app.task(bind=True)
+@debug_task
+def my_task(self, param1: str, param2: int) -> dict:
+    """Example task with debugging."""
+    # Task implementation
+    pass
+```
+
+### Error Recovery Patterns
+```python
+# /superset/tasks/error_handling.py
+from celery.exceptions import Retry
+
+class TaskErrorHandler:
+    """Error handling utilities for tasks."""
+
+    @staticmethod
+    def with_exponential_backoff(max_retries: int = 3, base_delay: int = 60):
+        """Decorator for exponential backoff retry logic."""
+        def decorator(task_func):
+            @wraps(task_func)
+            def wrapper(self, *args, **kwargs):
+                try:
+                    return task_func(self, *args, **kwargs)
+                except Exception as exc:
+                    if self.request.retries < max_retries:
+                        # Exponential backoff: 60s, 120s, 240s, etc.
+                        delay = base_delay * (2 ** self.request.retries)
+                        logger.warning(f"Task failed, retrying in {delay}s: {exc}")
+                        raise self.retry(countdown=delay, exc=exc)
+                    else:
+                        logger.error(f"Task failed after {max_retries} retries: {exc}")
+                        raise
+            return wrapper
+        return decorator
+
+    @staticmethod
+    def with_circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 300):
+        """Circuit breaker pattern for task failures."""
+        def decorator(task_func):
+            @wraps(task_func)
+            def wrapper(self, *args, **kwargs):
+                circuit_key = f"circuit_breaker_{task_func.__name__}"
+
+                # Check if circuit is open
+                if is_circuit_open(circuit_key):
+                    raise Exception("Circuit breaker is open")
+
+                try:
+                    result = task_func(self, *args, **kwargs)
+                    reset_circuit_breaker(circuit_key)
+                    return result
+                except Exception as exc:
+                    increment_circuit_failure(circuit_key)
+
+                    if get_circuit_failures(circuit_key) >= failure_threshold:
+                        open_circuit_breaker(circuit_key, recovery_timeout)
+
+                    raise
+            return wrapper
+        return decorator
+```
+
+## Performance Optimization
+
+### Task Optimization Tips
+```python
+# /superset/tasks/optimization.py
+
+# 1. Batch processing
+@celery_app.task
+def process_items_batch(item_ids: list[int], batch_size: int = 100):
+    """Process items in batches for better performance."""
+    for i in range(0, len(item_ids), batch_size):
+        batch = item_ids[i:i + batch_size]
+
+        # Process batch
+        items = Item.query.filter(Item.id.in_(batch)).all()
+        for item in items:
+            process_single_item(item)
+
+        # Commit after each batch
+        db.session.commit()
+
+        # Optional: add small delay to avoid overwhelming database
+        time.sleep(0.1)
+
+# 2. Memory-efficient processing
+@celery_app.task
+def process_large_dataset(dataset_id: int):
+    """Process large dataset without loading everything into memory."""
+    dataset = Dataset.query.get(dataset_id)
+
+    # Use streaming/pagination instead of loading all data
+    page_size = 1000
+    offset = 0
+
+    while True:
+        items = dataset.query.offset(offset).limit(page_size).all()
+        if not items:
+            break
+
+        for item in items:
+            process_single_item(item)
+
+        # Clear session to free memory
+        db.session.expunge_all()
+        db.session.commit()
+
+        offset += page_size
+
+# 3. Connection pooling for external services
+import redis
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
+
+# Reuse connections across task invocations
+redis_pool = redis.ConnectionPool(host='localhost', port=6379, db=0)
+db_engine = create_engine(
+    'postgresql://user:pass@localhost/db',
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=20
+)
+
+@celery_app.task
+def task_with_optimized_connections():
+    """Task that reuses connection pools."""
+    # Redis connection from pool
+    redis_conn = redis.Redis(connection_pool=redis_pool)
+
+    # Database connection from pool
+    with db_engine.connect() as conn:
+        result = conn.execute("SELECT * FROM table")
+        return result.fetchall()
+```
+
+## Best Practices
+
+### Task Design Guidelines
+1. **Idempotency**: Tasks should be safe to run multiple times
+2. **Small and Focused**: Each task should do one thing well
+3. **Fail Fast**: Validate inputs early and fail quickly
+4. **Progress Updates**: Provide progress updates for long-running tasks
+5. **Proper Error Handling**: Handle and log errors appropriately
+
+### Resource Management
+```python
+# Good: Resource cleanup
+@celery_app.task
+def task_with_cleanup():
+    temp_files = []
+    try:
+        # Task work
+        temp_file = create_temp_file()
+        temp_files.append(temp_file)
+        process_file(temp_file)
+    finally:
+        # Always cleanup
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+# Good: Context managers
+@celery_app.task
+def task_with_context_manager():
+    with database_transaction():
+        # All database operations in transaction
+        update_records()
+        create_summary()
+        # Automatically committed or rolled back
+```
+
+### Monitoring & Observability
+```python
+# Add metrics to tasks
+from superset.utils.metrics import metrics
+
+@celery_app.task
+def monitored_task():
+    with metrics.timer('task.execution_time'):
+        # Task work
+        result = do_work()
+
+    metrics.incr('task.completed')
+    return result
+
+# Add structured logging
+@celery_app.task
+def logged_task(param1: str):
+    logger.info(
+        "Task started",
+        extra={
+            'task_name': 'logged_task',
+            'param1': param1,
+            'task_id': self.request.id
+        }
+    )
+
+    # Task work
+
+    logger.info(
+        "Task completed",
+        extra={
+            'task_name': 'logged_task',
+            'duration': time.time() - start_time
+        }
+    )
+```
