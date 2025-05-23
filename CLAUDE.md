@@ -31,6 +31,7 @@ This project is designed to run in a **VS Code Dev Container** which provides a 
 2. **Automatic Service Startup**: All services start automatically via the `postStartCommand` in devcontainer.json:
    - Backend (Flask): http://localhost:8088
    - Frontend (Webpack dev server): http://localhost:9000  
+   - Storybook (Component development): http://localhost:6006
    - WebSocket server: http://localhost:8080
    - PostgreSQL: localhost:5432
    - Redis: localhost:6379
@@ -43,6 +44,7 @@ bash .devcontainer/restart-services.sh
 
 # Check service logs
 tail -f /app/superset_home/logs/frontend.log     # Frontend logs
+tail -f /app/superset_home/logs/storybook.log     # Storybook logs
 tail -f /app/superset_home/logs/backend.log      # Backend logs
 tail -f /app/superset_home/logs/celery.log       # Celery logs
 

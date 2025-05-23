@@ -132,12 +132,23 @@ else
     echo "📝 Frontend logs available at: /app/superset_home/logs/frontend.log"
 fi
 
+# Start Storybook
+if is_running "npm run storybook"; then
+    echo "✅ Storybook is already running"
+else
+    echo "📚 Starting Storybook on port 6006..."
+    # Start storybook in background
+    nohup npm run storybook > /app/superset_home/logs/storybook.log 2>&1 &
+    echo "📝 Storybook logs available at: /app/superset_home/logs/storybook.log"
+fi
+
 echo ""
 echo "🎉 All services have been started!"
 echo ""
 echo "🔧 Service Status:"
 echo "  - Backend:    http://localhost:8088 (Flask dev server with hot reload)"
 echo "  - Frontend:   http://localhost:9000 (Webpack dev server with hot reload)"  
+echo "  - Storybook:  http://localhost:6006 (Component development environment)"
 echo "  - WebSocket:  http://localhost:8080"
 echo "  - PostgreSQL: localhost:5432"
 echo "  - Redis:      localhost:6379"

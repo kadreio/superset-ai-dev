@@ -28,6 +28,7 @@ stop_process() {
 
 # Stop all Superset services
 stop_process "npm run dev-server" "Frontend Dev Server"
+stop_process "npm run storybook" "Storybook"
 stop_process "flask run" "Superset Backend"
 stop_process "superset.tasks.celery_app:app worker" "Celery Worker"
 stop_process "superset.tasks.celery_app:app beat" "Celery Beat"

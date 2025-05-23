@@ -1,5 +1,5 @@
 # Superset DevContainer Dockerfile
-FROM python:3.11.11-slim-bookworm
+FROM python:3.11.11
 
 LABEL dev.containers.image.vendor="Apache Superset"
 LABEL dev.containers.image.authors="Superset Development Team"
@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y \
     redis-tools \
     sudo \
     zstd \
+    chromium \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20

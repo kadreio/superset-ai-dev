@@ -47,7 +47,8 @@
     9000,
     8080,
     5432,
-    6379
+    6379,
+    6006
   ],
 
   "portsAttributes": {
@@ -70,6 +71,10 @@
     "6379": {
       "label": "Redis",
       "onAutoForward": "silent"
+    },
+    "6006": {
+      "label": "Storybook",
+      "onAutoForward": "openPreview"
     }
   },
 
