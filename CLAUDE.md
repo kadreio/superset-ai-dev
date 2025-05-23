@@ -179,3 +179,37 @@ bash .devcontainer/restart-services.sh
 - **Database Tests**: Multiple database engine compatibility testing
 
 When making changes, always run appropriate tests and ensure pre-commit hooks pass before committing.
+
+## Browser Automation & Testing Authenticated Views
+
+### MCP Puppeteer Integration
+
+This environment includes MCP Puppeteer tools for automated browser testing of authenticated Superset views. Use these tools to access protected pages that require login.
+
+#### Basic Authentication Pattern
+
+Where the superset app uses authentication, we must make sure to authenticate before using the puppeteer tool
+Always first log in to localhost:9000/login, and fill out the username and password as admin/admin
+
+Then, after successful login, navigate to the desired urls
+
+The development environment includes enhanced authentication config in `/app/docker/pythonpath_dev/superset_config.py`:
+
+- **Session Persistence**: Login sessions last 7 days to reduce re-authentication
+- **Public Role Access**: Some public pages accessible without full authentication
+- **WebDriver Support**: Selenium WebDriver authentication function available
+- **CSRF Disabled**: Cross-site request forgery protection disabled for testing
+
+#### Best Practices
+
+1. **Always authenticate first** before accessing protected URLs
+2. **Use screenshots** to verify page loads and content
+3. **Test both frontend (port 9000) and backend (port 8088)** URLs
+4. **Handle redirects** - some URLs may redirect to login if session expires
+5. **Use meaningful screenshot names** for debugging and verification
+
+#### Troubleshooting
+
+- If pages redirect to login, re-run the authentication sequence
+- Frontend dev server (port 9000) may have different auth behavior than backend
+- Check service logs if authentication fails: `tail -f /app/superset_home/logs/backend.log`

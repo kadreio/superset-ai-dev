@@ -1,0 +1,4 @@
+- [x] create devcontainer
+- [x] setup claude code
+- [x] update docs
+- [x] setup pupeteer mcp
