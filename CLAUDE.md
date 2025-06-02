@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Always
+
+Every time you start a session you must read every .mdx file in ./docs/docs/agent_docs and summarize the information about what you should know to work in this project.
+
 ## Architecture Overview
 
 Apache Superset is a modern, enterprise-ready business intelligence web application with a hybrid architecture:
@@ -188,10 +192,48 @@ This environment includes MCP Puppeteer tools for automated browser testing of a
 
 #### Basic Authentication Pattern
 
-Where the superset app uses authentication, we must make sure to authenticate before using the puppeteer tool
-Always first log in to localhost:9000/login, and fill out the username and password as admin/admin
+**Step 1: Configure Puppeteer for Container Environment**
+```javascript
+// Always use these launch options for headless browser in container
+{
+  "headless": true,
+  "args": [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-accelerated-2d-canvas",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-zygote",
+    "--single-process",
+    "--disable-extensions"
+  ]
+}
+// Set allowDangerous: true when using these args
+```
 
-Then, after successful login, navigate to the desired urls
+**Step 2: Navigate and Authenticate**
+```javascript
+// 1. Navigate to login page
+mcp__mcp-puppeteer__puppeteer_navigate("http://localhost:9000/login", launchOptions, allowDangerous: true)
+
+// 2. Fill credentials
+mcp__mcp-puppeteer__puppeteer_fill('input[name="username"]', "admin")
+mcp__mcp-puppeteer__puppeteer_fill('input[name="password"]', "admin")
+
+// 3. Click Sign In button (use JavaScript evaluation for complex selectors)
+mcp__mcp-puppeteer__puppeteer_evaluate(`
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const signInButton = buttons.find(btn => btn.textContent.includes('Sign In'));
+  if (signInButton) signInButton.click();
+`)
+
+// 4. Navigate to target page after authentication
+mcp__mcp-puppeteer__puppeteer_navigate("http://localhost:9000/superset/welcome/")
+```
+
+**Step 3: Verify Authentication**
+Always take a screenshot after login to verify successful authentication before proceeding.
 
 The development environment includes enhanced authentication config in `/app/docker/pythonpath_dev/superset_config.py`:
 

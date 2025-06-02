@@ -76,7 +76,7 @@ COPY scripts/check-env.py scripts/
 RUN mkdir -p superset/static && \
     echo '{"version": "dev", "sha": "unknown", "branch": "dev"}' > superset/static/version_info.json
 
-# Copy application code  
+# Copy application code
 COPY docker docker
 COPY superset superset
 COPY superset-frontend superset-frontend
@@ -86,7 +86,7 @@ COPY superset-websocket superset-websocket
 RUN mkdir -p /app/superset-frontend/node_modules && \
     chown -R superset:superset /app/superset-frontend/node_modules
 
-# Install Python dependencies using uv 
+# Install Python dependencies using uv
 RUN . /app/.venv/bin/activate && \
     uv pip install -r requirements/development.txt
 

@@ -307,6 +307,16 @@ export function Menu({
 
               return renderSubMenu(props);
             })}
+            <MainNav.Item key="google">
+              <a
+                href="https://google.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Open Google in a new tab"
+              >
+                Google
+              </a>
+            </MainNav.Item>
           </MainNav>
         </Col>
         <Col md={8} xs={24}>

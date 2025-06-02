@@ -5,7 +5,7 @@ The feature we're planning for:
 $ARGUMENTS
 
 
-The template is as follow:
+The template is as follows:
 
 ---
 

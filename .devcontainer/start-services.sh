@@ -13,10 +13,10 @@ start_service() {
     local name="$1"
     local command="$2"
     local logfile="/app/superset_home/logs/${name}.log"
-    
+
     # Create logs directory if it doesn't exist
     mkdir -p /app/superset_home/logs
-    
+
     if is_running "$command"; then
         echo "✅ $name is already running"
     else
@@ -100,7 +100,7 @@ fi
 # Start Celery worker
 start_service "Celery Worker" "celery --app=superset.tasks.celery_app:app worker -O fair -l INFO --concurrency=2"
 
-# Start Celery beat scheduler  
+# Start Celery beat scheduler
 start_service "Celery Beat" "rm -f /tmp/celerybeat.pid && celery --app=superset.tasks.celery_app:app beat --pidfile /tmp/celerybeat.pid -l INFO -s /app/superset_home/celerybeat-schedule"
 
 # Start the websocket server
@@ -147,7 +147,7 @@ echo "🎉 All services have been started!"
 echo ""
 echo "🔧 Service Status:"
 echo "  - Backend:    http://localhost:8088 (Flask dev server with hot reload)"
-echo "  - Frontend:   http://localhost:9000 (Webpack dev server with hot reload)"  
+echo "  - Frontend:   http://localhost:9000 (Webpack dev server with hot reload)"
 echo "  - Storybook:  http://localhost:6006 (Component development environment)"
 echo "  - WebSocket:  http://localhost:8080"
 echo "  - PostgreSQL: localhost:5432"

@@ -28,7 +28,7 @@ The devcontainer automatically sets up these services:
 2. **Select "Reopen in Container"** when prompted
 3. **Wait for setup** - The first time will take several minutes to:
    - Build the container
-   - Install Python dependencies 
+   - Install Python dependencies
    - Install Node.js dependencies
    - Set up the database with example data
    - Start all services
@@ -63,7 +63,7 @@ pytest tests/unit_tests/
 # Check service status
 bash .devcontainer/start-services.sh
 
-# Stop all services  
+# Stop all services
 bash .devcontainer/stop-services.sh
 
 # View service logs
@@ -73,7 +73,7 @@ less /app/superset_home/logs/*.log
 ## Ports
 
 - `8088` - Superset Backend (Flask development server)
-- `9000` - Frontend Development Server (Webpack with HMR) 
+- `9000` - Frontend Development Server (Webpack with HMR)
 - `8080` - WebSocket Server
 - `5432` - PostgreSQL Database
 - `6379` - Redis Cache

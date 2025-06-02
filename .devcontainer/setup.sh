@@ -16,7 +16,7 @@ elif [ -f "/usr/local/lib/python*/dist-packages/virtualenv" ]; then
     # Create new venv since the old one might be overwritten
     python3 -m venv /app/.venv
     VENV_PATH="/app/.venv"
-else 
+else
     # Create new venv
     python3 -m venv /app/.venv
     VENV_PATH="/app/.venv"
@@ -101,11 +101,11 @@ fi
 # Check if database is already initialized
 if ! PGPASSWORD=superset psql -h db -U superset -d superset -c "SELECT 1 FROM ab_user LIMIT 1;" > /dev/null 2>&1; then
     echo "🔧 Initializing Superset database..."
-    
+
     # Run database migrations
     echo "📊 Running database migrations..."
     superset db upgrade
-    
+
     # Create admin user
     echo "👤 Creating admin user..."
     superset fab create-admin \
@@ -114,17 +114,17 @@ if ! PGPASSWORD=superset psql -h db -U superset -d superset -c "SELECT 1 FROM ab
         --password admin \
         --firstname Superset \
         --lastname Admin
-    
+
     # Initialize roles and permissions
     echo "🔐 Setting up roles and permissions..."
     superset init
-    
+
     # Load example data if requested
     if [ "${SUPERSET_LOAD_EXAMPLES:-yes}" = "yes" ]; then
         echo "📈 Loading example data..."
         superset load_examples
     fi
-    
+
     echo "✅ Database initialization complete!"
 else
     echo "✅ Database already initialized, skipping setup"
@@ -133,14 +133,14 @@ fi
 # Install frontend dependencies if not already installed
 if [ ! -d "/app/superset-frontend/node_modules/.bin" ]; then
     echo "📦 Installing frontend dependencies..."
-    
+
     # Ensure node_modules directory has correct ownership
     if [ ! -w "/app/superset-frontend/node_modules" ]; then
         echo "Fixing node_modules directory permissions..."
         sudo mkdir -p /app/superset-frontend/node_modules
         sudo chown -R $(id -u):$(id -g) /app/superset-frontend/node_modules
     fi
-    
+
     cd /app/superset-frontend
     npm ci
     cd /app
