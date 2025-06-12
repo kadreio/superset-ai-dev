@@ -7,6 +7,13 @@
         "PUPPETEER_LAUNCH_OPTIONS": "{ \"headless\": false, \"executablePath\": \"/usr/bin/chromium\", \"args\": [] }",
         "ALLOW_DANGEROUS": "true"
       }
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "env": {
+        "DEFAULT_MINIMUM_TOKENS": "6000"
+      }
     }
   }
 }
